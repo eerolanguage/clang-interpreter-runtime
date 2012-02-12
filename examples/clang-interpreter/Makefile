@@ -15,6 +15,8 @@ NO_INSTALL = 1
 # No plugins, optimize startup time.
 TOOL_NO_EXPORTS = 1
 
+CPPFLAGS = -x objective-c++ 
+LDFLAGS = -framework Cocoa
 LINK_COMPONENTS := jit interpreter nativecodegen bitreader bitwriter ipo \
 	linker selectiondag asmparser instrumentation
 USEDLIBS = clangFrontend.a clangSerialization.a clangDriver.a clangCodeGen.a \

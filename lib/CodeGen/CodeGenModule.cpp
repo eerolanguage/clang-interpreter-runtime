@@ -131,10 +131,13 @@ CodeGenModule::~CodeGenModule() {
 }
 
 void CodeGenModule::createObjCRuntime() {
-  if (!Features.NeXTRuntime)
-    ObjCRuntime = CreateGNUObjCRuntime(*this);
-  else
-    ObjCRuntime = CreateMacObjCRuntime(*this);
+
+  ObjCRuntime = CreateJitObjCRuntime(*this);
+
+//   if (!Features.NeXTRuntime)
+//     ObjCRuntime = CreateGNUObjCRuntime(*this);
+//   else
+//     ObjCRuntime = CreateMacObjCRuntime(*this);
 }
 
 void CodeGenModule::createOpenCLRuntime() {

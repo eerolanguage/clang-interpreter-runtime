@@ -6,7 +6,7 @@
 // License. See LICENSE.TXT for details.
 //
 //===----------------------------------------------------------------------===//
-
+#include <stdio.h>
 #include "clang/CodeGen/CodeGenAction.h"
 #include "clang/Driver/Compilation.h"
 #include "clang/Driver/Driver.h"
@@ -22,6 +22,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ExecutionEngine/JIT.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
+#include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Support/Host.h"
@@ -29,6 +30,8 @@
 #include "llvm/Support/TargetSelect.h"
 using namespace clang;
 using namespace clang::driver;
+
+#import <Foundation/Foundation.h>
 
 // This function isn't referenced outside its translation unit, but it
 // can't use the "static" keyword because its address is used for
@@ -53,20 +56,40 @@ static int Execute(llvm::Module *Mod, char * const *envp) {
     return 255;
   }
 
+  llvm::Function *InitFn = Mod->getFunction(".objc_jit_init");
+  if (!InitFn) {
+    llvm::errs() << "'.objc_jit_init' function not found in module.\n";
+    return 255;
+  }
+
   llvm::Function *EntryFn = Mod->getFunction("main");
   if (!EntryFn) {
     llvm::errs() << "'main' function not found in module.\n";
     return 255;
   }
 
+  printf("Running .objc_jit_init()...\n");
+  std::vector<llvm::GenericValue> noargs;
+  EE->runFunction(InitFn, noargs);
+
   // FIXME: Support passing arguments.
   std::vector<std::string> Args;
   Args.push_back(Mod->getModuleIdentifier());
 
-  return EE->runFunctionAsMain(EntryFn, Args, envp);
+//  NSAutoreleasePool *pool = [NSAutoreleasePool new];
+  int mainResult;
+  mainResult = EE->runFunctionAsMain(EntryFn, Args, envp);
+//  [pool drain];
+//  [pool release];
+
+  return mainResult;
+
+
+//  return EE->runFunctionAsMain(EntryFn, Args, envp);
 }
 
 int main(int argc, const char **argv, char * const *envp) {
+
   void *MainAddr = (void*) (intptr_t) GetExecutablePath;
   llvm::sys::Path Path = GetExecutablePath(argv[0]);
   TextDiagnosticPrinter *DiagClient =

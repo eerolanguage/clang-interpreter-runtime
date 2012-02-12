@@ -261,6 +261,7 @@ public:
 //TODO: This should include some way of selecting which runtime to target.
 CGObjCRuntime *CreateGNUObjCRuntime(CodeGenModule &CGM);
 CGObjCRuntime *CreateMacObjCRuntime(CodeGenModule &CGM);
+CGObjCRuntime *CreateJitObjCRuntime(CodeGenModule &CGM);
 }
 }
 #endif
