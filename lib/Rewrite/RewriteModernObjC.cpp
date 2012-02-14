@@ -428,6 +428,8 @@ namespace {
       return false;
     }
     
+    bool convertObjCTypeToCStyleType(QualType &T);
+    
     bool needToScanForQualifiers(QualType T);
     QualType getSuperStructType();
     QualType getConstantStringStructType();
@@ -3174,9 +3176,13 @@ void RewriteModernObjC::RewriteObjCInternalStruct(ObjCInterfaceDecl *CDecl,
   for (unsigned i = 0, e = IVars.size(); i < e; i++) {
     ObjCIvarDecl *IvarDecl = IVars[i];
     QualType Type = IvarDecl->getType();
-    std::string TypeString(Type.getAsString(Context->getPrintingPolicy()));
+    std::string Name = IvarDecl->getNameAsString();
+
     Result += "\t";
-    Result += TypeString; Result += " "; Result += IvarDecl->getNameAsString();
+    convertObjCTypeToCStyleType(Type);
+    
+    Type.getAsStringInternal(Name, Context->getPrintingPolicy());
+    Result += Name;
     if (IvarDecl->isBitField()) {
       Result += " : "; Result += utostr(IvarDecl->getBitWidthValue(*Context));
     }
@@ -3693,6 +3699,27 @@ void RewriteModernObjC::GetInnerBlockDeclRefExprs(Stmt *S,
   return;
 }
 
+/// convertObjCTypeToCStyleType - This routine converts such objc types
+/// as qualified objects, and blocks to their closest c/c++ types that
+/// it can. It returns true if input type was modified.
+bool RewriteModernObjC::convertObjCTypeToCStyleType(QualType &T) {
+  QualType oldT = T;
+  convertBlockPointerToFunctionPointer(T);
+  if (T->isFunctionPointerType()) {
+    QualType PointeeTy;
+    if (const PointerType* PT = T->getAs<PointerType>()) {
+      PointeeTy = PT->getPointeeType();
+      if (const FunctionType *FT = PointeeTy->getAs<FunctionType>()) {
+        T = convertFunctionTypeOfBlocks(FT);
+        T = Context->getPointerType(T);
+      }
+    }
+  }
+  
+  convertToUnqualifiedObjCType(T);
+  return T != oldT;
+}
+
 /// convertFunctionTypeOfBlocks - This routine converts a function type
 /// whose result type may be a block pointer or whose argument type(s)
 /// might be block pointers to an equivalent function type replacing
@@ -3703,22 +3730,20 @@ QualType RewriteModernObjC::convertFunctionTypeOfBlocks(const FunctionType *FT) 
   // Generate a funky cast.
   SmallVector<QualType, 8> ArgTypes;
   QualType Res = FT->getResultType();
-  bool HasBlockType = convertBlockPointerToFunctionPointer(Res);
+  bool modified = convertObjCTypeToCStyleType(Res);
   
   if (FTP) {
     for (FunctionProtoType::arg_type_iterator I = FTP->arg_type_begin(),
          E = FTP->arg_type_end(); I && (I != E); ++I) {
       QualType t = *I;
       // Make sure we convert "t (^)(...)" to "t (*)(...)".
-      if (convertBlockPointerToFunctionPointer(t))
-        HasBlockType = true;
+      if (convertObjCTypeToCStyleType(t))
+        modified = true;
       ArgTypes.push_back(t);
     }
   }
   QualType FuncType;
-  // FIXME. Does this work if block takes no argument but has a return type
-  // which is of block type?
-  if (HasBlockType)
+  if (modified)
     FuncType = getSimpleFunctionType(Res, &ArgTypes[0], ArgTypes.size());
   else FuncType = QualType(FT, 0);
   return FuncType;
@@ -5448,12 +5473,51 @@ static void Write__extendedMethodTypes_initializer(RewriteModernObjC &RewriteObj
   }
 }
 
+static void Write_IvarOffsetVar(std::string &Result, 
+                                ArrayRef<ObjCIvarDecl *> Ivars, 
+                                StringRef VarName, 
+                                StringRef ClassName) {
+  // FIXME. visibilty of offset symbols may have to be set; for Darwin
+  // this is what happens:
+  /**
+   if (Ivar->getAccessControl() == ObjCIvarDecl::Private ||
+       Ivar->getAccessControl() == ObjCIvarDecl::Package ||
+       Class->getVisibility() == HiddenVisibility)
+     Visibility shoud be: HiddenVisibility;
+   else
+     Visibility shoud be: DefaultVisibility;
+  */
+  
+  Result += "\n";
+  for (unsigned i =0, e = Ivars.size(); i < e; i++) {
+    ObjCIvarDecl *IvarDecl = Ivars[i];
+    Result += "unsigned long int "; Result += VarName;
+    Result += ClassName; Result += "_";
+    Result += IvarDecl->getName(); 
+    Result += " __attribute__ ((used, section (\"__DATA,__objc_ivar\")))";
+    Result += " = ";
+    if (IvarDecl->isBitField()) {
+      // FIXME: The hack below doesn't work for bitfields. For now, we simply
+      // place all bitfields at offset 0.
+      Result += "0;\n";
+    }
+    else {
+      Result += "__OFFSETOFIVAR__(struct ";
+      Result += ClassName;
+      Result += "_IMPL, "; 
+      Result += IvarDecl->getName(); Result += ");\n";
+    }
+  }
+}
+
 static void Write__ivar_list_t_initializer(RewriteModernObjC &RewriteObj,
                                            ASTContext *Context, std::string &Result,
                                            ArrayRef<ObjCIvarDecl *> Ivars,
                                            StringRef VarName,
                                            StringRef ClassName) {
   if (Ivars.size() > 0) {
+    Write_IvarOffsetVar(Result, Ivars, "OBJC_IVAR_$_", ClassName);
+    
     Result += "\nstatic ";
     Write__ivar_list_t_TypeDecl(Result, Ivars.size());
     Result += " "; Result += VarName;
@@ -5467,8 +5531,10 @@ static void Write__ivar_list_t_initializer(RewriteModernObjC &RewriteObj,
         Result += "\t{{";
       else
         Result += "\t {";
-      // FIXME: // pointer to ivar offset location
-      Result += "(unsigned long int *)0, ";
+      
+      Result += "(unsigned long int *)&OBJC_IVAR_$_";
+      Result += ClassName; Result += "_"; Result += IvarDecl->getName();
+      Result += ", ";
       
       Result += "\""; Result += IvarDecl->getName(); Result += "\", ";
       std::string IvarTypeString, QuoteIvarTypeString;

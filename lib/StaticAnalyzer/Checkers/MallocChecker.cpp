@@ -42,6 +42,7 @@ public:
   bool isReleased() const { return K == Released; }
   //bool isEscaped() const { return K == Escaped; }
   //bool isRelinquished() const { return K == Relinquished; }
+  const Stmt *getStmt() const { return S; }
 
   bool operator==(const RefState &X) const {
     return K == X.K && S == X.S;
@@ -64,8 +65,6 @@ public:
     ID.AddPointer(S);
   }
 };
-
-class RegionState {};
 
 class MallocChecker : public Checker<check::DeadSymbols,
                                      check::EndPath,
@@ -188,12 +187,20 @@ private:
 } // end anonymous namespace
 
 typedef llvm::ImmutableMap<SymbolRef, RefState> RegionStateTy;
-
+typedef llvm::ImmutableMap<SymbolRef, SymbolRef> SymRefToSymRefTy;
+class RegionState {};
+class ReallocPairs {};
 namespace clang {
 namespace ento {
   template <>
   struct ProgramStateTrait<RegionState> 
     : public ProgramStatePartialTrait<RegionStateTy> {
+    static void *GDMIndex() { static int x; return &x; }
+  };
+
+  template <>
+  struct ProgramStateTrait<ReallocPairs>
+    : public ProgramStatePartialTrait<SymRefToSymRefTy> {
     static void *GDMIndex() { static int x; return &x; }
   };
 }
@@ -402,16 +409,11 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
   if (!isa<Loc>(location))
     return 0;
 
-  // FIXME: Technically using 'Assume' here can result in a path
-  //  bifurcation.  In such cases we need to return two states, not just one.
+  // The explicit NULL case, no operation is performed.
   ProgramStateRef notNullState, nullState;
   llvm::tie(notNullState, nullState) = state->assume(location);
-
-  // The explicit NULL case, no operation is performed.
   if (nullState && !notNullState)
     return 0;
-
-  assert(notNullState);
 
   // Unknown values could easily be okay
   // Undefined values are handled elsewhere
@@ -483,8 +485,8 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
 
   // Normal free.
   if (Hold)
-    return notNullState->set<RegionState>(Sym, RefState::getRelinquished(CE));
-  return notNullState->set<RegionState>(Sym, RefState::getReleased(CE));
+    return state->set<RegionState>(Sym, RefState::getRelinquished(CE));
+  return state->set<RegionState>(Sym, RefState::getReleased(CE));
 }
 
 bool MallocChecker::SummarizeValue(raw_ostream &os, SVal V) {
@@ -642,43 +644,58 @@ void MallocChecker::ReallocMem(CheckerContext &C, const CallExpr *CE) const {
     svalBuilder.evalEQ(state, Arg1Val,
                        svalBuilder.makeIntValWithPtrWidth(0, false));
 
+  ProgramStateRef StatePtrIsNull, StatePtrNotNull;
+  llvm::tie(StatePtrIsNull, StatePtrNotNull) = state->assume(PtrEQ);
+  ProgramStateRef StateSizeIsZero, StateSizeNotZero;
+  llvm::tie(StateSizeIsZero, StateSizeNotZero) = state->assume(SizeZero);
+  // We only assume exceptional states if they are definitely true; if the
+  // state is under-constrained, assume regular realloc behavior.
+  bool PrtIsNull = StatePtrIsNull && !StatePtrNotNull;
+  bool SizeIsZero = StateSizeIsZero && !StateSizeNotZero;
+
   // If the ptr is NULL and the size is not 0, the call is equivalent to 
   // malloc(size).
-  ProgramStateRef stateEqual = state->assume(PtrEQ, true);
-  if (stateEqual && state->assume(SizeZero, false)) {
-    // Hack: set the NULL symbolic region to released to suppress false warning.
-    // In the future we should add more states for allocated regions, e.g., 
-    // CheckedNull, CheckedNonNull.
-    
-    SymbolRef Sym = arg0Val.getAsLocSymbol();
-    if (Sym)
-      stateEqual = stateEqual->set<RegionState>(Sym, RefState::getReleased(CE));
-
+  if ( PrtIsNull && !SizeIsZero) {
     ProgramStateRef stateMalloc = MallocMemAux(C, CE, CE->getArg(1), 
-                                              UndefinedVal(), stateEqual);
+                                               UndefinedVal(), StatePtrIsNull);
     C.addTransition(stateMalloc);
+    return;
   }
 
-  if (ProgramStateRef stateNotEqual = state->assume(PtrEQ, false)) {
-    // If the size is 0, free the memory.
-    if (ProgramStateRef stateSizeZero =
-          stateNotEqual->assume(SizeZero, true))
-      if (ProgramStateRef stateFree = 
-          FreeMemAux(C, CE, stateSizeZero, 0, false)) {
+  if (PrtIsNull && SizeIsZero)
+    return;
 
-        // Bind the return value to NULL because it is now free.
-        C.addTransition(stateFree->BindExpr(CE, LCtx,
-                                            svalBuilder.makeNull(), true));
-      }
-    if (ProgramStateRef stateSizeNotZero =
-          stateNotEqual->assume(SizeZero,false))
-      if (ProgramStateRef stateFree = FreeMemAux(C, CE, stateSizeNotZero,
-                                                0, false)) {
-        // FIXME: We should copy the content of the original buffer.
-        ProgramStateRef stateRealloc = MallocMemAux(C, CE, CE->getArg(1), 
-                                                   UnknownVal(), stateFree);
-        C.addTransition(stateRealloc);
-      }
+  // Get the from and to pointer symbols as in toPtr = realloc(fromPtr, size).
+  assert(!PrtIsNull);
+  SymbolRef FromPtr = arg0Val.getAsSymbol();
+  SVal RetVal = state->getSVal(CE, LCtx);
+  SymbolRef ToPtr = RetVal.getAsSymbol();
+  if (!FromPtr || !ToPtr)
+    return;
+
+  // If the size is 0, free the memory.
+  if (SizeIsZero)
+    if (ProgramStateRef stateFree = FreeMemAux(C, CE, StateSizeIsZero,0,false)){
+      // The semantics of the return value are:
+      // If size was equal to 0, either NULL or a pointer suitable to be passed
+      // to free() is returned.
+      stateFree = stateFree->set<ReallocPairs>(ToPtr, FromPtr);
+      C.getSymbolManager().addSymbolDependency(ToPtr, FromPtr);
+      C.addTransition(stateFree);
+      return;
+    }
+
+  // Default behavior.
+  if (ProgramStateRef stateFree = FreeMemAux(C, CE, state, 0, false)) {
+    // FIXME: We should copy the content of the original buffer.
+    ProgramStateRef stateRealloc = MallocMemAux(C, CE, CE->getArg(1),
+                                                UnknownVal(), stateFree);
+    if (!stateRealloc)
+      return;
+    stateRealloc = stateRealloc->set<ReallocPairs>(ToPtr, FromPtr);
+    C.getSymbolManager().addSymbolDependency(ToPtr, FromPtr);
+    C.addTransition(stateRealloc);
+    return;
   }
 }
 
@@ -738,6 +755,14 @@ void MallocChecker::checkDeadSymbols(SymbolReaper &SymReaper,
     }
   }
   
+  // Cleanup the Realloc Pairs Map.
+  SymRefToSymRefTy RP = state->get<ReallocPairs>();
+  for (SymRefToSymRefTy::iterator I = RP.begin(), E = RP.end(); I != E; ++I) {
+    if (SymReaper.isDead(I->first) || SymReaper.isDead(I->second)) {
+      state = state->remove<ReallocPairs>(I->first);
+    }
+  }
+
   ExplodedNode *N = C.addTransition(state->set<RegionState>(RS));
 
   if (N && generateReport) {
@@ -871,12 +896,31 @@ ProgramStateRef MallocChecker::evalAssume(ProgramStateRef state,
                                               SVal Cond,
                                               bool Assumption) const {
   RegionStateTy RS = state->get<RegionState>();
-
   for (RegionStateTy::iterator I = RS.begin(), E = RS.end(); I != E; ++I) {
     // If the symbol is assumed to NULL or another constant, this will
     // return an APSInt*.
     if (state->getSymVal(I.getKey()))
       state = state->remove<RegionState>(I.getKey());
+  }
+
+  // Realloc returns 0 when reallocation fails, which means that we should
+  // restore the state of the pointer being reallocated.
+  SymRefToSymRefTy RP = state->get<ReallocPairs>();
+  for (SymRefToSymRefTy::iterator I = RP.begin(), E = RP.end(); I != E; ++I) {
+    // If the symbol is assumed to NULL or another constant, this will
+    // return an APSInt*.
+    if (state->getSymVal(I.getKey())) {
+      const RefState *RS = state->get<RegionState>(I.getData());
+      if (RS) {
+        if (RS->isReleased())
+          state = state->set<RegionState>(I.getData(),
+                             RefState::getAllocateUnchecked(RS->getStmt()));
+        else if (RS->isAllocated())
+          state = state->set<RegionState>(I.getData(),
+                             RefState::getReleased(RS->getStmt()));
+      }
+      state = state->remove<ReallocPairs>(I.getKey());
+    }
   }
 
   return state;

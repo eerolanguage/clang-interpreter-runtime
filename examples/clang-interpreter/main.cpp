@@ -49,7 +49,7 @@ static int Execute(llvm::Module *Mod, char * const *envp) {
   llvm::InitializeNativeTarget();
 
   std::string Error;
-  llvm::OwningPtr<llvm::ExecutionEngine> EE(
+  OwningPtr<llvm::ExecutionEngine> EE(
     llvm::ExecutionEngine::createJIT(Mod, &Error));
   if (!EE) {
     llvm::errs() << "unable to make execution engine: " << Error << "\n";
@@ -106,7 +106,7 @@ int main(int argc, const char **argv, char * const *envp) {
   // (basically, exactly one input, and the operation mode is hard wired).
   llvm::SmallVector<const char *, 16> Args(argv, argv + argc);
   Args.push_back("-fsyntax-only");
-  llvm::OwningPtr<Compilation> C(TheDriver.BuildCompilation(Args));
+  OwningPtr<Compilation> C(TheDriver.BuildCompilation(Args));
   if (!C)
     return 0;
 
@@ -116,7 +116,7 @@ int main(int argc, const char **argv, char * const *envp) {
   // failed. Extract that job from the compilation.
   const driver::JobList &Jobs = C->getJobs();
   if (Jobs.size() != 1 || !isa<driver::Command>(*Jobs.begin())) {
-    llvm::SmallString<256> Msg;
+    SmallString<256> Msg;
     llvm::raw_svector_ostream OS(Msg);
     C->PrintJob(OS, C->getJobs(), "; ", true);
     Diags.Report(diag::err_fe_expected_compiler_job) << OS.str();
@@ -131,7 +131,7 @@ int main(int argc, const char **argv, char * const *envp) {
 
   // Initialize a compiler invocation object from the clang (-cc1) arguments.
   const driver::ArgStringList &CCArgs = Cmd->getArguments();
-  llvm::OwningPtr<CompilerInvocation> CI(new CompilerInvocation);
+  OwningPtr<CompilerInvocation> CI(new CompilerInvocation);
   CompilerInvocation::CreateFromArgs(*CI,
                                      const_cast<const char **>(CCArgs.data()),
                                      const_cast<const char **>(CCArgs.data()) +
@@ -163,7 +163,7 @@ int main(int argc, const char **argv, char * const *envp) {
       CompilerInvocation::GetResourcesPath(argv[0], MainAddr);
 
   // Create and execute the frontend to generate an LLVM bitcode module.
-  llvm::OwningPtr<CodeGenAction> Act(new EmitLLVMOnlyAction());
+  OwningPtr<CodeGenAction> Act(new EmitLLVMOnlyAction());
   if (!Clang.ExecuteAction(*Act))
     return 1;
 

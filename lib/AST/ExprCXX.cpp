@@ -752,36 +752,58 @@ LambdaExpr::LambdaExpr(QualType T,
                        LambdaCaptureDefault CaptureDefault,
                        ArrayRef<Capture> Captures, 
                        bool ExplicitParams,
+                       bool ExplicitResultType,
                        ArrayRef<Expr *> CaptureInits,
+                       ArrayRef<VarDecl *> ArrayIndexVars,
+                       ArrayRef<unsigned> ArrayIndexStarts,
                        SourceLocation ClosingBrace)
   : Expr(LambdaExprClass, T, VK_RValue, OK_Ordinary,
          T->isDependentType(), T->isDependentType(), T->isDependentType(),
          /*ContainsUnexpandedParameterPack=*/false),
     IntroducerRange(IntroducerRange),
     NumCaptures(Captures.size()),
-    NumExplicitCaptures(0),
     CaptureDefault(CaptureDefault),
     ExplicitParams(ExplicitParams),
+    ExplicitResultType(ExplicitResultType),
     ClosingBrace(ClosingBrace)
 {
   assert(CaptureInits.size() == Captures.size() && "Wrong number of arguments");
-
+  CXXRecordDecl *Class = getLambdaClass();
+  CXXRecordDecl::LambdaDefinitionData &Data = Class->getLambdaData();
+  
+  // FIXME: Propagate "has unexpanded parameter pack" bit.
+  
   // Copy captures.
-  // FIXME: Do we need to update "contains unexpanded parameter pack" here?
-  Capture *ToCapture = reinterpret_cast<Capture *>(this + 1);
+  ASTContext &Context = Class->getASTContext();
+  Data.NumCaptures = NumCaptures;
+  Data.NumExplicitCaptures = 0;
+  Data.Captures = (Capture *)Context.Allocate(sizeof(Capture) * NumCaptures);
+  Capture *ToCapture = Data.Captures;
   for (unsigned I = 0, N = Captures.size(); I != N; ++I) {
     if (Captures[I].isExplicit())
-      ++NumExplicitCaptures;
+      ++Data.NumExplicitCaptures;
+    
     *ToCapture++ = Captures[I];
   }
-
+ 
   // Copy initialization expressions for the non-static data members.
   Stmt **Stored = getStoredStmts();
   for (unsigned I = 0, N = CaptureInits.size(); I != N; ++I)
     *Stored++ = CaptureInits[I];
-
+  
   // Copy the body of the lambda.
   *Stored++ = getCallOperator()->getBody();
+
+  // Copy the array index variables, if any.
+  HasArrayIndexVars = !ArrayIndexVars.empty();
+  if (HasArrayIndexVars) {
+    assert(ArrayIndexStarts.size() == NumCaptures);
+    memcpy(getArrayIndexVars(), ArrayIndexVars.data(),
+           sizeof(VarDecl *) * ArrayIndexVars.size());
+    memcpy(getArrayIndexStarts(), ArrayIndexStarts.data(), 
+           sizeof(unsigned) * Captures.size());
+    getArrayIndexStarts()[Captures.size()] = ArrayIndexVars.size();
+  }  
 }
 
 LambdaExpr *LambdaExpr::Create(ASTContext &Context, 
@@ -790,18 +812,63 @@ LambdaExpr *LambdaExpr::Create(ASTContext &Context,
                                LambdaCaptureDefault CaptureDefault,
                                ArrayRef<Capture> Captures, 
                                bool ExplicitParams,
+                               bool ExplicitResultType,
                                ArrayRef<Expr *> CaptureInits,
+                               ArrayRef<VarDecl *> ArrayIndexVars,
+                               ArrayRef<unsigned> ArrayIndexStarts,
                                SourceLocation ClosingBrace) {
   // Determine the type of the expression (i.e., the type of the
   // function object we're creating).
   QualType T = Context.getTypeDeclType(Class);
-  size_t Size = sizeof(LambdaExpr) + sizeof(Capture) * Captures.size()
-              + sizeof(Stmt *) * (Captures.size() + 1);
 
-  void *Mem = Context.Allocate(Size, llvm::alignOf<LambdaExpr>());
+  unsigned Size = sizeof(LambdaExpr) + sizeof(Stmt *) * (Captures.size() + 1);
+  if (!ArrayIndexVars.empty())
+    Size += sizeof(VarDecl *) * ArrayIndexVars.size()
+          + sizeof(unsigned) * (Captures.size() + 1);
+  void *Mem = Context.Allocate(Size);
   return new (Mem) LambdaExpr(T, IntroducerRange, CaptureDefault, 
-                              Captures, ExplicitParams, CaptureInits,
+                              Captures, ExplicitParams, ExplicitResultType,
+                              CaptureInits, ArrayIndexVars, ArrayIndexStarts,
                               ClosingBrace);
+}
+
+LambdaExpr::capture_iterator LambdaExpr::capture_begin() const {
+  return getLambdaClass()->getLambdaData().Captures;
+}
+
+LambdaExpr::capture_iterator LambdaExpr::capture_end() const {
+  return capture_begin() + NumCaptures;
+}
+
+LambdaExpr::capture_iterator LambdaExpr::explicit_capture_begin() const {
+  return capture_begin();
+}
+
+LambdaExpr::capture_iterator LambdaExpr::explicit_capture_end() const {
+  struct CXXRecordDecl::LambdaDefinitionData &Data
+    = getLambdaClass()->getLambdaData();
+  return Data.Captures + Data.NumExplicitCaptures;
+}
+
+LambdaExpr::capture_iterator LambdaExpr::implicit_capture_begin() const {
+  return explicit_capture_end();
+}
+
+LambdaExpr::capture_iterator LambdaExpr::implicit_capture_end() const {
+  return capture_end();
+}
+
+ArrayRef<VarDecl *> 
+LambdaExpr::getCaptureInitIndexVars(capture_init_iterator Iter) const {
+  assert(HasArrayIndexVars && "No array index-var data?");
+  
+  unsigned Index = Iter - capture_init_begin();
+  assert(Index < getLambdaClass()->getLambdaData().NumCaptures &&
+         "Capture index out-of-range");
+  VarDecl **IndexVars = getArrayIndexVars();
+  unsigned *IndexStarts = getArrayIndexStarts();
+  return ArrayRef<VarDecl *>(IndexVars + IndexStarts[Index],
+                             IndexVars + IndexStarts[Index + 1]);
 }
 
 CXXRecordDecl *LambdaExpr::getLambdaClass() const {

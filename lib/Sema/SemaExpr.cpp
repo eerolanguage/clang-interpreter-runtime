@@ -9283,8 +9283,6 @@ namespace {
       return BaseTransform::TransformUnaryOperator(E);
     }
 
-    /// \brief Transform the capture expressions in the lambda
-    /// expression.
     ExprResult TransformLambdaExpr(LambdaExpr *E) {
       // Lambdas never need to be transformed.
       return E;
@@ -9642,6 +9640,7 @@ static ExprResult captureInLambda(Sema &S, LambdaScopeInfo *LSI,
   bool InitializingArray = false;
   QualType BaseType = FieldType;
   QualType SizeType = S.Context.getSizeType();
+  LSI->ArrayIndexStarts.push_back(LSI->ArrayIndexVars.size());
   while (const ConstantArrayType *Array
                         = S.Context.getAsConstantArrayType(BaseType)) {
     InitializingArray = true;
@@ -9660,7 +9659,8 @@ static ExprResult captureInLambda(Sema &S, LambdaScopeInfo *LSI,
                         S.Context.getTrivialTypeSourceInfo(SizeType, Loc),
                         SC_None, SC_None);
     IndexVariables.push_back(IterationVar);
-
+    LSI->ArrayIndexVars.push_back(IterationVar);
+    
     // Create a reference to the iteration variable.
     ExprResult IterationVarRef
       = S.BuildDeclRefExpr(IterationVar, SizeType, VK_LValue, Loc);

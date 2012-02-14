@@ -835,8 +835,7 @@ public:
                                          PartialDiagnostic> Note);
 
   bool RequireLiteralType(SourceLocation Loc, QualType T,
-                          const PartialDiagnostic &PD,
-                          bool AllowIncompleteType = false);
+                          const PartialDiagnostic &PD);
 
   QualType getElaboratedType(ElaboratedTypeKeyword Keyword,
                              const CXXScopeSpec &SS, QualType T);
@@ -1004,23 +1003,8 @@ public:
                                      bool &AddToScope);
   bool AddOverriddenMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
 
-  /// \brief The kind of constexpr declaration checking we are performing.
-  ///
-  /// The kind affects which diagnostics (if any) are emitted if the function
-  /// does not satisfy the requirements of a constexpr function declaration.
-  enum CheckConstexprKind {
-    /// \brief Check a constexpr function declaration, and produce errors if it
-    /// does not satisfy the requirements.
-    CCK_Declaration,
-    /// \brief Check a constexpr function template instantiation.
-    CCK_Instantiation,
-    /// \brief Produce notes explaining why an instantiation was not constexpr.
-    CCK_NoteNonConstexprInstantiation
-  };
-  bool CheckConstexprFunctionDecl(const FunctionDecl *FD,
-                                  CheckConstexprKind CCK);
-  bool CheckConstexprFunctionBody(const FunctionDecl *FD, Stmt *Body,
-                                  bool IsInstantiation);
+  bool CheckConstexprFunctionDecl(const FunctionDecl *FD);
+  bool CheckConstexprFunctionBody(const FunctionDecl *FD, Stmt *Body);
 
   void DiagnoseHiddenVirtualMethods(CXXRecordDecl *DC, CXXMethodDecl *MD);
   // Returns true if the function declaration is a redeclaration
@@ -3483,6 +3467,31 @@ public:
   /// initializer for the declaration 'Dcl'.
   void ActOnCXXExitDeclInitializer(Scope *S, Decl *Dcl);
 
+  /// \brief Create a new lambda closure type.
+  CXXRecordDecl *createLambdaClosureType(SourceRange IntroducerRange);
+  
+  /// \brief Start the definition of a lambda expression.
+  CXXMethodDecl *startLambdaDefinition(CXXRecordDecl *Class,
+                                       SourceRange IntroducerRange,
+                                       TypeSourceInfo *MethodType,
+                                       SourceLocation EndLoc);
+  
+  /// \brief Introduce the scope for a lambda expression.
+  sema::LambdaScopeInfo *enterLambdaScope(CXXMethodDecl *CallOperator,
+                                          SourceRange IntroducerRange,
+                                          LambdaCaptureDefault CaptureDefault,
+                                          bool ExplicitParams,
+                                          bool ExplicitResultType,
+                                          bool Mutable);
+  
+  /// \brief Note that we have finished the explicit captures for the
+  /// given lambda.
+  void finishLambdaExplicitCaptures(sema::LambdaScopeInfo *LSI);
+  
+  /// \brief Introduce the lambda parameters into scope.
+  void addLambdaParameters(CXXMethodDecl *CallOperator, Scope *CurScope,
+                           llvm::ArrayRef<ParmVarDecl *> Params);
+  
   /// ActOnStartOfLambdaDefinition - This is called just before we start
   /// parsing the body of a lambda; it analyzes the explicit captures and 
   /// arguments, and sets up various data-structures for the body of the
@@ -3492,12 +3501,13 @@ public:
 
   /// ActOnLambdaError - If there is an error parsing a lambda, this callback
   /// is invoked to pop the information about the lambda.
-  void ActOnLambdaError(SourceLocation StartLoc, Scope *CurScope);
+  void ActOnLambdaError(SourceLocation StartLoc, Scope *CurScope,
+                        bool IsInstantiation = false);
 
   /// ActOnLambdaExpr - This is called when the body of a lambda expression
   /// was successfully completed.
   ExprResult ActOnLambdaExpr(SourceLocation StartLoc, Stmt *Body,
-                             Scope *CurScope);
+                             Scope *CurScope, bool IsInstantiation = false);
 
   // ParseObjCStringLiteral - Parse Objective-C string literals.
   ExprResult ParseObjCStringLiteral(SourceLocation *AtLocs,

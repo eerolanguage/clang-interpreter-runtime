@@ -1362,7 +1362,9 @@ CharUnits CodeGenModule::GetTargetTypeStoreSize(llvm::Type *Ty) const {
 void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   llvm::Constant *Init = 0;
   QualType ASTTy = D->getType();
-  bool NonConstInit = false;
+  CXXRecordDecl *RD = ASTTy->getBaseElementTypeUnsafe()->getAsCXXRecordDecl();
+  bool NeedsGlobalCtor = false;
+  bool NeedsGlobalDtor = RD && !RD->hasTrivialDestructor();
 
   const VarDecl *InitDecl;
   const Expr *InitExpr = D->getAnyInitializer(InitDecl);
@@ -1388,15 +1390,16 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 
       if (getLangOptions().CPlusPlus) {
         Init = EmitNullConstant(T);
-        NonConstInit = true;
+        NeedsGlobalCtor = true;
       } else {
         ErrorUnsupported(D, "static initializer");
         Init = llvm::UndefValue::get(getTypes().ConvertType(T));
       }
     } else {
       // We don't need an initializer, so remove the entry for the delayed
-      // initializer position (just in case this entry was delayed).
-      if (getLangOptions().CPlusPlus)
+      // initializer position (just in case this entry was delayed) if we
+      // also don't need to register a destructor.
+      if (getLangOptions().CPlusPlus && !NeedsGlobalDtor)
         DelayedCXXInitPosition.erase(D);
     }
   }
@@ -1451,7 +1454,8 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
 
   // If it is safe to mark the global 'constant', do so now.
   GV->setConstant(false);
-  if (!NonConstInit && DeclIsConstantGlobal(Context, D, true))
+  if (!NeedsGlobalCtor && !NeedsGlobalDtor &&
+      DeclIsConstantGlobal(Context, D, true))
     GV->setConstant(true);
 
   GV->setAlignment(getContext().getDeclAlign(D).getQuantity());
@@ -1467,8 +1471,8 @@ void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D) {
   SetCommonAttributes(D, GV);
 
   // Emit the initializer function if necessary.
-  if (NonConstInit)
-    EmitCXXGlobalVarDeclInitFunc(D, GV);
+  if (NeedsGlobalCtor || NeedsGlobalDtor)
+    EmitCXXGlobalVarDeclInitFunc(D, GV, NeedsGlobalCtor);
 
   // Emit global variable debug information.
   if (CGDebugInfo *DI = getModuleDebugInfo())
