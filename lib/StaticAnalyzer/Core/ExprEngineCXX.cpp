@@ -251,8 +251,9 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
   StmtNodeBuilder Bldr(Pred, Dst, *currentBuilderContext);
   
   unsigned blockCount = currentBuilderContext->getCurrentBlockCount();
+  const LocationContext *LCtx = Pred->getLocationContext();
   DefinedOrUnknownSVal symVal =
-    svalBuilder.getConjuredSymbolVal(NULL, CNE, CNE->getType(), blockCount);
+    svalBuilder.getConjuredSymbolVal(NULL, CNE, LCtx, CNE->getType(), blockCount);
   const MemRegion *NewReg = cast<loc::MemRegionVal>(symVal).getRegion();  
   QualType ObjTy = CNE->getType()->getAs<PointerType>()->getPointeeType();
   const ElementRegion *EleReg = 
@@ -268,6 +269,8 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
     return;
   }
 
+  // FIXME: Update for AST changes.
+#if 0
   // Evaluate constructor arguments.
   const FunctionProtoType *FnType = NULL;
   const CXXConstructorDecl *CD = CNE->getConstructor();
@@ -327,6 +330,7 @@ void ExprEngine::VisitCXXNewExpr(const CXXNewExpr *CNE, ExplodedNode *Pred,
                             loc::MemRegionVal(EleReg));
     Bldr.generateNode(CNE, *I, state);
   }
+#endif
 }
 
 void ExprEngine::VisitCXXDeleteExpr(const CXXDeleteExpr *CDE, 

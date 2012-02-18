@@ -417,3 +417,46 @@ namespace PR10504 {
   };
   void f(A *x) { delete x; } // expected-warning {{delete called on 'PR10504::A' that is abstract but has non-virtual destructor}}
 }
+
+struct PlacementArg {};
+inline void *operator new[](size_t, const PlacementArg &) throw () {
+  return 0;
+}
+inline void operator delete[](void *, const PlacementArg &) throw () {
+}
+
+namespace r150682 {
+
+  template <typename X>
+  struct S {
+    struct Inner {};
+    S() { new Inner[1]; }
+  };
+
+  struct T {
+  };
+
+  template<typename X>
+  void tfn() {
+    new (*(PlacementArg*)0) T[1];
+  }
+
+  void fn() {
+    tfn<int>();
+  }
+
+}
+
+namespace P12023 {
+  struct CopyCounter
+  {
+      CopyCounter();
+      CopyCounter(const CopyCounter&);
+  };
+
+  int main()
+  {
+    CopyCounter* f = new CopyCounter[10](CopyCounter()); // expected-error {{cannot have initialization arguments}}
+      return 0;
+  }
+}

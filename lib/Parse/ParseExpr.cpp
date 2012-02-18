@@ -726,7 +726,9 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
          (&II == Ident_super && getCurScope()->isInObjcMethodScope()))) {
       ConsumeToken();
       
-      if (Tok.isNot(tok::identifier)) {
+      // Allow either an identifier or the keyword 'class' (in C++).
+      if (Tok.isNot(tok::identifier) && 
+          !(getLang().CPlusPlus && Tok.is(tok::kw_class))) {
         Diag(Tok, diag::err_expected_property_name);
         return ExprError();
       }
@@ -1406,11 +1408,23 @@ Parser::ParsePostfixExpressionSuffix(ExprResult LHS) {
       // FIXME: Add support for explicit call of template constructor.
       SourceLocation TemplateKWLoc;
       UnqualifiedId Name;
-      if (ParseUnqualifiedId(SS, 
-                             /*EnteringContext=*/false, 
-                             /*AllowDestructorName=*/true,
-                             /*AllowConstructorName=*/ getLang().MicrosoftExt, 
-                             ObjectType, TemplateKWLoc, Name))
+      if (getLang().ObjC2 && OpKind == tok::period && Tok.is(tok::kw_class)) {
+        // Objective-C++:
+        //   After a '.' in a member access expression, treat the keyword
+        //   'class' as if it were an identifier.
+        //
+        // This hack allows property access to the 'class' method because it is
+        // such a common method name. For other C++ keywords that are 
+        // Objective-C method names, one must use the message send syntax.
+        IdentifierInfo *Id = Tok.getIdentifierInfo();
+        SourceLocation Loc = ConsumeToken();
+        Name.setIdentifier(Id, Loc);
+      } else if (ParseUnqualifiedId(SS, 
+                                    /*EnteringContext=*/false, 
+                                    /*AllowDestructorName=*/true,
+                                    /*AllowConstructorName=*/
+                                      getLang().MicrosoftExt, 
+                                    ObjectType, TemplateKWLoc, Name))
         LHS = ExprError();
       
       if (!LHS.isInvalid())
@@ -1852,7 +1866,7 @@ Parser::ParseParenExpression(ParenParseOption &ExprType, bool stopIfCastExpr,
     StringRef BridgeCastName = Tok.getName();
     SourceLocation BridgeKeywordLoc = ConsumeToken();
     if (!PP.getSourceManager().isInSystemHeader(BridgeKeywordLoc))
-      Diag(BridgeKeywordLoc, diag::err_arc_bridge_cast_nonarc)
+      Diag(BridgeKeywordLoc, diag::warn_arc_bridge_cast_nonarc)
         << BridgeCastName
         << FixItHint::CreateReplacement(BridgeKeywordLoc, "");
     BridgeCast = false;
@@ -2276,7 +2290,6 @@ ExprResult Parser::ParseBlockLiteralExpression() {
   // allows determining whether a variable reference inside the block is
   // within or outside of the block.
   ParseScope BlockScope(this, Scope::BlockScope | Scope::FnScope |
-                              Scope::BreakScope | Scope::ContinueScope |
                               Scope::DeclScope);
 
   // Inform sema that we are starting a block.

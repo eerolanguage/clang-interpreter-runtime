@@ -3128,6 +3128,7 @@ ExprResult Sema::BuildCXXDefaultArgExpr(SourceLocation CallLoc,
       //   the semantic constraints are checked, at the point where the
       //   default argument expression appears.
       ContextRAII SavedContext(*this, FD);
+      LocalInstantiationScope Local(*this);
       Result = SubstExpr(UninstExpr, ArgList);
     }
     if (Result.isInvalid())
@@ -9574,8 +9575,13 @@ static bool shouldAddConstForScope(CapturingScopeInfo *CSI, VarDecl *VD) {
     return false;
   if (isa<BlockScopeInfo>(CSI))
     return true;
-  if (LambdaScopeInfo *LSI = dyn_cast<LambdaScopeInfo>(CSI))
-    return !LSI->Mutable;
+  if (LambdaScopeInfo *LSI = dyn_cast<LambdaScopeInfo>(CSI)) {
+    if (LSI->isCaptured(VD))
+      return LSI->getCapture(VD).isCopyCapture() && !LSI->Mutable;
+    
+    return LSI->ImpCaptureStyle == LambdaScopeInfo::ImpCap_LambdaByval &&
+           !LSI->Mutable;
+  }
   return false;
 }
 
@@ -10148,15 +10154,13 @@ namespace {
     }
     
     void VisitCXXNewExpr(CXXNewExpr *E) {
-      if (E->getConstructor())
-        S.MarkFunctionReferenced(E->getLocStart(), E->getConstructor());
       if (E->getOperatorNew())
         S.MarkFunctionReferenced(E->getLocStart(), E->getOperatorNew());
       if (E->getOperatorDelete())
         S.MarkFunctionReferenced(E->getLocStart(), E->getOperatorDelete());
       Inherited::VisitCXXNewExpr(E);
     }
-    
+
     void VisitCXXDeleteExpr(CXXDeleteExpr *E) {
       if (E->getOperatorDelete())
         S.MarkFunctionReferenced(E->getLocStart(), E->getOperatorDelete());

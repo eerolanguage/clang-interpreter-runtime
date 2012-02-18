@@ -30,6 +30,7 @@
 #include "clang/Basic/TargetInfo.h"
 #include "clang/Lex/Preprocessor.h"
 #include "TypeLocBuilder.h"
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
 using namespace clang;
@@ -636,8 +637,8 @@ ExprResult Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *E,
   if (isPointer)
     return Owned(E);
 
-  // If the class has a non-trivial destructor, we must be able to call it.
-  if (RD->hasTrivialDestructor())
+  // If the class has a destructor, we must be able to call it.
+  if (RD->hasIrrelevantDestructor())
     return Owned(E);
 
   CXXDestructorDecl *Destructor
@@ -648,6 +649,7 @@ ExprResult Sema::CheckCXXThrowOperand(SourceLocation ThrowLoc, Expr *E,
   MarkFunctionReferenced(E->getExprLoc(), Destructor);
   CheckDestructorAccess(E->getExprLoc(), Destructor,
                         PDiag(diag::err_access_dtor_exception) << Ty);
+  DiagnoseUseOfDecl(Destructor, E->getExprLoc());
   return Owned(E);
 }
 
@@ -914,9 +916,7 @@ ExprResult
 Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   SourceLocation PlacementLParen, MultiExprArg PlacementArgs,
                   SourceLocation PlacementRParen, SourceRange TypeIdParens,
-                  Declarator &D, SourceLocation ConstructorLParen,
-                  MultiExprArg ConstructorArgs,
-                  SourceLocation ConstructorRParen) {
+                  Declarator &D, Expr *Initializer) {
   bool TypeContainsAuto = D.getDeclSpec().getTypeSpecType() == DeclSpec::TST_auto;
 
   Expr *ArraySize = 0;
@@ -961,6 +961,10 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
   if (D.isInvalidType())
     return ExprError();
 
+  SourceRange DirectInitRange;
+  if (ParenListExpr *List = dyn_cast_or_null<ParenListExpr>(Initializer))
+    DirectInitRange = List->getSourceRange();
+
   return BuildCXXNew(StartLoc, UseGlobal,
                      PlacementLParen,
                      move(PlacementArgs),
@@ -969,10 +973,28 @@ Sema::ActOnCXXNew(SourceLocation StartLoc, bool UseGlobal,
                      AllocType,
                      TInfo,
                      ArraySize,
-                     ConstructorLParen,
-                     move(ConstructorArgs),
-                     ConstructorRParen,
+                     DirectInitRange,
+                     Initializer,
                      TypeContainsAuto);
+}
+
+static bool isLegalArrayNewInitializer(CXXNewExpr::InitializationStyle Style,
+                                       Expr *Init) {
+  if (!Init)
+    return true;
+  if (ParenListExpr *PLE = dyn_cast<ParenListExpr>(Init))
+    return PLE->getNumExprs() == 0;
+  if (isa<ImplicitValueInitExpr>(Init))
+    return true;
+  else if (CXXConstructExpr *CCE = dyn_cast<CXXConstructExpr>(Init))
+    return !CCE->isListInitialization() &&
+           CCE->getConstructor()->isDefaultConstructor();
+  else if (Style == CXXNewExpr::ListInit) {
+    assert(isa<InitListExpr>(Init) &&
+           "Shouldn't create list CXXConstructExprs for arrays.");
+    return true;
+  }
+  return false;
 }
 
 ExprResult
@@ -984,29 +1006,56 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                   QualType AllocType,
                   TypeSourceInfo *AllocTypeInfo,
                   Expr *ArraySize,
-                  SourceLocation ConstructorLParen,
-                  MultiExprArg ConstructorArgs,
-                  SourceLocation ConstructorRParen,
+                  SourceRange DirectInitRange,
+                  Expr *Initializer,
                   bool TypeMayContainAuto) {
   SourceRange TypeRange = AllocTypeInfo->getTypeLoc().getSourceRange();
 
+  CXXNewExpr::InitializationStyle initStyle;
+  if (DirectInitRange.isValid()) {
+    assert(Initializer && "Have parens but no initializer.");
+    initStyle = CXXNewExpr::CallInit;
+  } else if (Initializer && isa<InitListExpr>(Initializer))
+    initStyle = CXXNewExpr::ListInit;
+  else {
+    assert((!Initializer || isa<ImplicitValueInitExpr>(Initializer) ||
+            isa<CXXConstructExpr>(Initializer)) &&
+           "Initializer expression that cannot have been implicitly created.");
+    initStyle = CXXNewExpr::NoInit;
+  }
+
+  Expr **Inits = &Initializer;
+  unsigned NumInits = Initializer ? 1 : 0;
+  if (initStyle == CXXNewExpr::CallInit) {
+    if (ParenListExpr *List = dyn_cast<ParenListExpr>(Initializer)) {
+      Inits = List->getExprs();
+      NumInits = List->getNumExprs();
+    } else if (CXXConstructExpr *CCE = dyn_cast<CXXConstructExpr>(Initializer)){
+      if (!isa<CXXTemporaryObjectExpr>(CCE)) {
+        // Can happen in template instantiation. Since this is just an implicit
+        // construction, we just take it apart and rebuild it.
+        Inits = CCE->getArgs();
+        NumInits = CCE->getNumArgs();
+      }
+    }
+  }
+
   // C++0x [decl.spec.auto]p6. Deduce the type which 'auto' stands in for.
   if (TypeMayContainAuto && AllocType->getContainedAutoType()) {
-    if (ConstructorArgs.size() == 0)
+    if (initStyle == CXXNewExpr::NoInit || NumInits == 0)
       return ExprError(Diag(StartLoc, diag::err_auto_new_requires_ctor_arg)
                        << AllocType << TypeRange);
-    if (ConstructorArgs.size() != 1) {
-      Expr *FirstBad = ConstructorArgs.get()[1];
+    if (initStyle == CXXNewExpr::ListInit)
+      return ExprError(Diag(Inits[0]->getSourceRange().getBegin(),
+                            diag::err_auto_new_requires_parens)
+                       << AllocType << TypeRange);
+    if (NumInits > 1) {
+      Expr *FirstBad = Inits[1];
       return ExprError(Diag(FirstBad->getSourceRange().getBegin(),
                             diag::err_auto_new_ctor_multiple_expressions)
                        << AllocType << TypeRange);
     }
-    Expr *Deduce = ConstructorArgs.get()[0];
-    if (ConstructorLParen.isInvalid()) {
-      return ExprError(Diag(Deduce->getSourceRange().getBegin(),
-                            diag::err_auto_new_requires_parens)
-                       << AllocType << TypeRange);
-    }
+    Expr *Deduce = Inits[0];
     TypeSourceInfo *DeducedType = 0;
     if (DeduceAutoType(AllocTypeInfo, Deduce, DeducedType) ==
             DAR_Failed)
@@ -1035,15 +1084,10 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   if (CheckAllocatedType(AllocType, TypeRange.getBegin(), TypeRange))
     return ExprError();
 
-  bool ListInitialization = ConstructorLParen.isInvalid() &&
-                            ConstructorArgs.size() > 0;
-  assert((!ListInitialization || (ConstructorArgs.size() == 1 &&
-                                  isa<InitListExpr>(ConstructorArgs.get()[0])))
-         && "List initialization means a braced-init-list for arguments.");
-  if (ListInitialization && isStdInitializerList(AllocType, 0)) {
+  if (initStyle == CXXNewExpr::ListInit && isStdInitializerList(AllocType, 0)) {
     Diag(AllocTypeInfo->getTypeLoc().getBeginLoc(),
          diag::warn_dangling_std_initializer_list)
-      << /*at end of FE*/0 << ConstructorArgs.get()[0]->getSourceRange();
+      << /*at end of FE*/0 << Inits[0]->getSourceRange();
   }
 
   // In ARC, infer 'retaining' for the allocated 
@@ -1201,25 +1245,30 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
     }
   }
 
-  bool Init = ConstructorLParen.isValid() || ConstructorArgs.size() > 0;
-  // --- Choosing a constructor ---
-  CXXConstructorDecl *Constructor = 0;
-  bool HadMultipleCandidates = false;
-  Expr **ConsArgs = (Expr**)ConstructorArgs.get();
-  unsigned NumConsArgs = ConstructorArgs.size();
-  ASTOwningVector<Expr*> ConvertedConstructorArgs(*this);
-
-  // Array 'new' can't have any initializers.
-  if (NumConsArgs && (ResultType->isArrayType() || ArraySize)) {
-    SourceRange InitRange(ConsArgs[0]->getLocStart(),
-                          ConsArgs[NumConsArgs - 1]->getLocEnd());
-
-    Diag(StartLoc, diag::err_new_array_init_args) << InitRange;
-    return ExprError();
+  QualType InitType = AllocType;
+  // Array 'new' can't have any initializers except empty parentheses.
+  // Initializer lists are also allowed, in C++11. Rely on the parser for the
+  // dialect distinction.
+  if (ResultType->isArrayType() || ArraySize) {
+    if (!isLegalArrayNewInitializer(initStyle, Initializer)) {
+      SourceRange InitRange(Inits[0]->getLocStart(),
+                            Inits[NumInits - 1]->getLocEnd());
+      Diag(StartLoc, diag::err_new_array_init_args) << InitRange;
+      return ExprError();
+    }
+    if (InitListExpr *ILE = dyn_cast_or_null<InitListExpr>(Initializer)) {
+      // We do the initialization typechecking against the array type
+      // corresponding to the number of initializers + 1 (to also check
+      // default-initialization).
+      unsigned NumElements = ILE->getNumInits() + 1;
+      InitType = Context.getConstantArrayType(AllocType,
+          llvm::APInt(Context.getTypeSize(Context.getSizeType()), NumElements),
+                                              ArrayType::Normal, 0);
+    }
   }
 
   if (!AllocType->isDependentType() &&
-      !Expr::hasAnyTypeDependentArguments(ConsArgs, NumConsArgs)) {
+      !Expr::hasAnyTypeDependentArguments(Inits, NumInits)) {
     // C++11 [expr.new]p15:
     //   A new-expression that creates an object of type T initializes that
     //   object as follows:
@@ -1227,49 +1276,31 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
     //     - If the new-initializer is omitted, the object is default-
     //       initialized (8.5); if no initialization is performed,
     //       the object has indeterminate value
-      = !Init? InitializationKind::CreateDefault(TypeRange.getBegin())
+      = initStyle == CXXNewExpr::NoInit
+          ? InitializationKind::CreateDefault(TypeRange.getBegin())
     //     - Otherwise, the new-initializer is interpreted according to the
     //       initialization rules of 8.5 for direct-initialization.
-             : ListInitialization ? InitializationKind::CreateDirectList(
-                                                          TypeRange.getBegin())
-                                  : InitializationKind::CreateDirect(
-                                                          TypeRange.getBegin(),
-                                                          ConstructorLParen,
-                                                          ConstructorRParen);
+          : initStyle == CXXNewExpr::ListInit
+              ? InitializationKind::CreateDirectList(TypeRange.getBegin())
+              : InitializationKind::CreateDirect(TypeRange.getBegin(),
+                                                 DirectInitRange.getBegin(),
+                                                 DirectInitRange.getEnd());
 
     InitializedEntity Entity
-      = InitializedEntity::InitializeNew(StartLoc, AllocType);
-    InitializationSequence InitSeq(*this, Entity, Kind, ConsArgs, NumConsArgs);
+      = InitializedEntity::InitializeNew(StartLoc, InitType);
+    InitializationSequence InitSeq(*this, Entity, Kind, Inits, NumInits);
     ExprResult FullInit = InitSeq.Perform(*this, Entity, Kind,
-                                                move(ConstructorArgs));
+                                          MultiExprArg(Inits, NumInits));
     if (FullInit.isInvalid())
       return ExprError();
 
-    // FullInit is our initializer; walk through it to determine if it's a
-    // constructor call, which CXXNewExpr handles directly.
-    if (Expr *FullInitExpr = (Expr *)FullInit.get()) {
-      if (CXXBindTemporaryExpr *Binder
-            = dyn_cast<CXXBindTemporaryExpr>(FullInitExpr))
-        FullInitExpr = Binder->getSubExpr();
-      if (CXXConstructExpr *Construct
-                    = dyn_cast<CXXConstructExpr>(FullInitExpr)) {
-        Constructor = Construct->getConstructor();
-        HadMultipleCandidates = Construct->hadMultipleCandidates();
-        for (CXXConstructExpr::arg_iterator A = Construct->arg_begin(),
-                                         AEnd = Construct->arg_end();
-             A != AEnd; ++A)
-          ConvertedConstructorArgs.push_back(*A);
-      } else {
-        // Take the converted initializer.
-        ConvertedConstructorArgs.push_back(FullInit.release());
-      }
-    } else {
-      // No initialization required.
-    }
+    // FullInit is our initializer; strip off CXXBindTemporaryExprs, because
+    // we don't want the initialized object to be destructed.
+    if (CXXBindTemporaryExpr *Binder =
+            dyn_cast_or_null<CXXBindTemporaryExpr>(FullInit.get()))
+      FullInit = Owned(Binder->getSubExpr());
 
-    // Take the converted arguments and use them for the new expression.
-    NumConsArgs = ConvertedConstructorArgs.size();
-    ConsArgs = (Expr **)ConvertedConstructorArgs.take();
+    Initializer = FullInit.take();
   }
 
   // Mark the new and delete operators as referenced.
@@ -1281,35 +1312,30 @@ Sema::BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
   // C++0x [expr.new]p17:
   //   If the new expression creates an array of objects of class type,
   //   access and ambiguity control are done for the destructor.
-  if (ArraySize && Constructor) {
-    if (CXXDestructorDecl *dtor = LookupDestructor(Constructor->getParent())) {
+  if (ArraySize && AllocType->isRecordType() && !AllocType->isDependentType()) {
+    if (CXXDestructorDecl *dtor = LookupDestructor(
+            cast<CXXRecordDecl>(AllocType->getAs<RecordType>()->getDecl()))) {
       MarkFunctionReferenced(StartLoc, dtor);
       CheckDestructorAccess(StartLoc, dtor, 
                             PDiag(diag::err_access_dtor)
                               << Context.getBaseElementType(AllocType));
+      DiagnoseUseOfDecl(dtor, StartLoc);
     }
   }
 
   PlacementArgs.release();
-  ConstructorArgs.release();
 
   return Owned(new (Context) CXXNewExpr(Context, UseGlobal, OperatorNew,
-                                        PlaceArgs, NumPlaceArgs, TypeIdParens,
-                                        ArraySize, Constructor, Init,
-                                        ConsArgs, NumConsArgs,
-                                        HadMultipleCandidates,
                                         OperatorDelete,
                                         UsualArrayDeleteWantsSize,
+                                        PlaceArgs, NumPlaceArgs, TypeIdParens,
+                                        ArraySize, initStyle, Initializer,
                                         ResultType, AllocTypeInfo,
-                                        StartLoc,
-                                        Init ? ConstructorRParen :
-                                               TypeRange.getEnd(),
-                                        ConstructorLParen, ConstructorRParen));
+                                        StartLoc, DirectInitRange));
 }
 
-/// CheckAllocatedType - Checks that a type is suitable as the allocated type
+/// \brief Checks that a type is suitable as the allocated type
 /// in a new-expression.
-/// dimension off and stores the size expression in ArraySize.
 bool Sema::CheckAllocatedType(QualType AllocType, SourceLocation Loc,
                               SourceRange R) {
   // C++ 5.3.4p1: "[The] type shall be a complete object type, but not an
@@ -2040,7 +2066,7 @@ Sema::ActOnCXXDelete(SourceLocation StartLoc, bool UseGlobal,
           UsualArrayDeleteWantsSize = (OperatorDelete->getNumParams() == 2);
       }
 
-      if (!PointeeRD->hasTrivialDestructor())
+      if (!PointeeRD->hasIrrelevantDestructor())
         if (CXXDestructorDecl *Dtor = LookupDestructor(PointeeRD)) {
           MarkFunctionReferenced(StartLoc,
                                     const_cast<CXXDestructorDecl*>(Dtor));
@@ -4285,23 +4311,28 @@ ExprResult Sema::MaybeBindToTemporary(Expr *E) {
   }
 
   // That should be enough to guarantee that this type is complete.
-  // If it has a trivial destructor, we can avoid the extra copy.
   CXXRecordDecl *RD = cast<CXXRecordDecl>(RT->getDecl());
-  if (RD->isInvalidDecl() || RD->hasTrivialDestructor())
+  if (RD->isInvalidDecl() || RD->isDependentContext())
     return Owned(E);
-
   CXXDestructorDecl *Destructor = LookupDestructor(RD);
 
-  CXXTemporary *Temp = CXXTemporary::Create(Context, Destructor);
   if (Destructor) {
     MarkFunctionReferenced(E->getExprLoc(), Destructor);
     CheckDestructorAccess(E->getExprLoc(), Destructor,
                           PDiag(diag::err_access_dtor_temp)
                             << E->getType());
+    DiagnoseUseOfDecl(Destructor, E->getExprLoc());
+  }
 
+  // If destructor is trivial, we can avoid the extra copy.
+  if (Destructor->isTrivial())
+    return Owned(E);
+
+  if (Destructor)
     // We need a cleanup, but we don't need to remember the temporary.
     ExprNeedsCleanups = true;
-  }
+
+  CXXTemporary *Temp = CXXTemporary::Create(Context, Destructor);
   return Owned(CXXBindTemporaryExpr::Create(Context, Temp, E));
 }
 

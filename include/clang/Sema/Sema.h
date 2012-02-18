@@ -1702,9 +1702,6 @@ public:
     ForRedeclaration
   };
 
-private:
-  bool CppLookupName(LookupResult &R, Scope *S);
-
   SpecialMemberOverloadResult *LookupSpecialMember(CXXRecordDecl *D,
                                                    CXXSpecialMember SM,
                                                    bool ConstArg,
@@ -1712,6 +1709,9 @@ private:
                                                    bool RValueThis,
                                                    bool ConstThis,
                                                    bool VolatileThis);
+
+private:
+  bool CppLookupName(LookupResult &R, Scope *S);
 
   // \brief The set of known/encountered (unique, canonicalized) NamespaceDecls.
   //
@@ -2961,17 +2961,6 @@ public:
   /// definition when it is defaulted.
   bool ShouldDeleteSpecialMember(CXXMethodDecl *MD, CXXSpecialMember CSM);
 
-  /// \brief Determine if a defaulted copy assignment operator ought to be
-  /// deleted.
-  bool ShouldDeleteCopyAssignmentOperator(CXXMethodDecl *MD);
-
-  /// \brief Determine if a defaulted move assignment operator ought to be
-  /// deleted.
-  bool ShouldDeleteMoveAssignmentOperator(CXXMethodDecl *MD);
-
-  /// \brief Determine if a defaulted destructor ought to be deleted.
-  bool ShouldDeleteDestructor(CXXDestructorDecl *DD);
-
   /// \brief Declare the implicit default constructor for the given class.
   ///
   /// \param ClassDecl The class declaration into which the implicit
@@ -3194,9 +3183,7 @@ public:
                          MultiExprArg PlacementArgs,
                          SourceLocation PlacementRParen,
                          SourceRange TypeIdParens, Declarator &D,
-                         SourceLocation ConstructorLParen,
-                         MultiExprArg ConstructorArgs,
-                         SourceLocation ConstructorRParen);
+                         Expr *Initializer);
   ExprResult BuildCXXNew(SourceLocation StartLoc, bool UseGlobal,
                          SourceLocation PlacementLParen,
                          MultiExprArg PlacementArgs,
@@ -3205,9 +3192,8 @@ public:
                          QualType AllocType,
                          TypeSourceInfo *AllocTypeInfo,
                          Expr *ArraySize,
-                         SourceLocation ConstructorLParen,
-                         MultiExprArg ConstructorArgs,
-                         SourceLocation ConstructorRParen,
+                         SourceRange DirectInitRange,
+                         Expr *Initializer,
                          bool TypeMayContainAuto = true);
 
   bool CheckAllocatedType(QualType AllocType, SourceLocation Loc,

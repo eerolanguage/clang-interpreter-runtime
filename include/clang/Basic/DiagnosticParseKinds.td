@@ -151,6 +151,9 @@ def err_at_in_class : Error<"unexpected '@' in member specification">;
 
 def err_expected_fn_body : Error<
   "expected function body after function declarator">;
+def warn_attribute_on_function_definition : Warning<
+  "GCC does not allow %0 attribute in this position on a function definition">, 
+  InGroup<GccCompat>;
 def err_expected_method_body : Error<"expected method body">;
 def err_invalid_token_after_toplevel_declarator : Error<
   "expected ';' after top level declarator">;
@@ -327,8 +330,8 @@ let CategoryName = "ARC Parse Issue" in {
 def err_arc_bridge_retain : Error<
   "unknown cast annotation __bridge_retain; did you mean __bridge_retained?">;
 // To be default mapped to an error later.
-def err_arc_bridge_cast_nonarc : Warning<
-  "'%0' casts are only allowed when using ARC">,
+def warn_arc_bridge_cast_nonarc : Warning<
+  "'%0' casts have no effect when not using ARC">,
   InGroup<DiagGroup<"arc-bridge-casts-disallowed-in-nonarc">>;
 }
   
@@ -599,6 +602,8 @@ def err_expected_lambda_body : Error<"expected body of lambda expression">;
 def warn_cxx98_compat_lambda : Warning<
   "lambda expressions are incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
+def err_lambda_missing_parens : Error<
+  "lambda requires '()' before %select{'mutable'|return type}0">;
 
 // Availability attribute
 def err_expected_version : Error<

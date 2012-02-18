@@ -33,8 +33,6 @@ RValue CodeGenFunction::EmitCXXMemberCall(const CXXMethodDecl *MD,
   assert(MD->isInstance() &&
          "Trying to emit a member call expr on a static method!");
 
-  const FunctionProtoType *FPT = MD->getType()->getAs<FunctionProtoType>();
-
   CallArgList Args;
 
   // Push the this ptr.
@@ -45,13 +43,16 @@ RValue CodeGenFunction::EmitCXXMemberCall(const CXXMethodDecl *MD,
     QualType T = getContext().getPointerType(getContext().VoidPtrTy);
     Args.add(RValue::get(VTT), T);
   }
+
+  const FunctionProtoType *FPT = MD->getType()->castAs<FunctionProtoType>();
+  RequiredArgs required = RequiredArgs::forPrototypePlus(FPT, Args.size());
   
-  // And the rest of the call args
+  // And the rest of the call args.
   EmitCallArgs(Args, FPT, ArgBeg, ArgEnd);
 
-  QualType ResultType = FPT->getResultType();
-  return EmitCall(CGM.getTypes().getFunctionInfo(ResultType, Args,
-                                                 FPT->getExtInfo()),
+  return EmitCall(CGM.getTypes().arrangeFunctionCall(FPT->getResultType(), Args,
+                                                     FPT->getExtInfo(),
+                                                     required),
                   Callee, ReturnValue, Args, MD);
 }
 
@@ -229,17 +230,16 @@ RValue CodeGenFunction::EmitCXXMemberCallExpr(const CXXMemberCallExpr *CE,
   // Compute the function type we're calling.
   const CGFunctionInfo *FInfo = 0;
   if (isa<CXXDestructorDecl>(MD))
-    FInfo = &CGM.getTypes().getFunctionInfo(cast<CXXDestructorDecl>(MD),
-                                           Dtor_Complete);
+    FInfo = &CGM.getTypes().arrangeCXXDestructor(cast<CXXDestructorDecl>(MD),
+                                                 Dtor_Complete);
   else if (isa<CXXConstructorDecl>(MD))
-    FInfo = &CGM.getTypes().getFunctionInfo(cast<CXXConstructorDecl>(MD),
-                                            Ctor_Complete);
+    FInfo = &CGM.getTypes().arrangeCXXConstructorDeclaration(
+                                                 cast<CXXConstructorDecl>(MD),
+                                                 Ctor_Complete);
   else
-    FInfo = &CGM.getTypes().getFunctionInfo(MD);
+    FInfo = &CGM.getTypes().arrangeCXXMethodDeclaration(MD);
 
-  const FunctionProtoType *FPT = MD->getType()->getAs<FunctionProtoType>();
-  llvm::Type *Ty
-    = CGM.getTypes().GetFunctionType(*FInfo, FPT->isVariadic());
+  llvm::Type *Ty = CGM.getTypes().GetFunctionType(*FInfo);
 
   // C++ [class.virtual]p12:
   //   Explicit qualification with the scope operator (5.1) suppresses the
@@ -322,7 +322,7 @@ CodeGenFunction::EmitCXXMemberPointerCallExpr(const CXXMemberCallExpr *E,
   
   // And the rest of the call args
   EmitCallArgs(Args, FPT, E->arg_begin(), E->arg_end());
-  return EmitCall(CGM.getTypes().getFunctionInfo(Args, FPT), Callee, 
+  return EmitCall(CGM.getTypes().arrangeFunctionCall(Args, FPT), Callee, 
                   ReturnValue, Args);
 }
 
@@ -743,11 +743,8 @@ static llvm::Value *EmitCXXNewAllocSize(CodeGenFunction &CGF,
 
 static void StoreAnyExprIntoOneUnit(CodeGenFunction &CGF, const CXXNewExpr *E,
                                     llvm::Value *NewPtr) {
-  
-  assert(E->getNumConstructorArgs() == 1 &&
-         "Can only have one argument to initializer of POD type.");
-  
-  const Expr *Init = E->getConstructorArg(0);
+
+  const Expr *Init = E->getInitializer();
   QualType AllocType = E->getAllocatedType();
 
   CharUnits Alignment = CGF.getContext().getTypeAlignInChars(AllocType);
@@ -773,9 +770,8 @@ CodeGenFunction::EmitNewArrayInitializer(const CXXNewExpr *E,
                                          QualType elementType,
                                          llvm::Value *beginPtr,
                                          llvm::Value *numElements) {
-  // We have a POD type.
-  if (E->getNumConstructorArgs() == 0)
-    return;
+  if (!E->hasInitializer())
+    return; // We have a POD type.
 
   // Check if the number of elements is constant.
   bool checkZero = true;
@@ -858,13 +854,15 @@ static void EmitNewInitializer(CodeGenFunction &CGF, const CXXNewExpr *E,
                                llvm::Value *NewPtr,
                                llvm::Value *NumElements,
                                llvm::Value *AllocSizeWithoutCookie) {
+  const Expr *Init = E->getInitializer();
   if (E->isArray()) {
-    if (CXXConstructorDecl *Ctor = E->getConstructor()) {
+    if (const CXXConstructExpr *CCE = dyn_cast_or_null<CXXConstructExpr>(Init)){
+      CXXConstructorDecl *Ctor = CCE->getConstructor();
       bool RequiresZeroInitialization = false;
       if (Ctor->getParent()->hasTrivialDefaultConstructor()) {
         // If new expression did not specify value-initialization, then there
         // is no initialization.
-        if (!E->hasInitializer() || Ctor->getParent()->isEmpty())
+        if (!CCE->requiresZeroInitialization() || Ctor->getParent()->isEmpty())
           return;
       
         if (CGF.CGM.getTypes().isZeroInitializable(ElementType)) {
@@ -877,43 +875,24 @@ static void EmitNewInitializer(CodeGenFunction &CGF, const CXXNewExpr *E,
         RequiresZeroInitialization = true;
       }
 
-      CGF.EmitCXXAggrConstructorCall(Ctor, NumElements, NewPtr, 
-                                     E->constructor_arg_begin(), 
-                                     E->constructor_arg_end(),
+      CGF.EmitCXXAggrConstructorCall(Ctor, NumElements, NewPtr,
+                                     CCE->arg_begin(),  CCE->arg_end(),
                                      RequiresZeroInitialization);
       return;
-    } else if (E->getNumConstructorArgs() == 1 &&
-               isa<ImplicitValueInitExpr>(E->getConstructorArg(0)) &&
+    } else if (Init && isa<ImplicitValueInitExpr>(Init) &&
                CGF.CGM.getTypes().isZeroInitializable(ElementType)) {
       // Optimization: since zero initialization will just set the memory
       // to all zeroes, generate a single memset to do it in one shot.
       EmitZeroMemSet(CGF, ElementType, NewPtr, AllocSizeWithoutCookie);
       return;
-    } else {
-      CGF.EmitNewArrayInitializer(E, ElementType, NewPtr, NumElements);
-      return;
     }
-  }
-
-  if (CXXConstructorDecl *Ctor = E->getConstructor()) {
-    // Per C++ [expr.new]p15, if we have an initializer, then we're performing
-    // direct initialization. C++ [dcl.init]p5 requires that we 
-    // zero-initialize storage if there are no user-declared constructors.
-    if (E->hasInitializer() && 
-        !Ctor->getParent()->hasUserDeclaredConstructor() &&
-        !Ctor->getParent()->isEmpty())
-      CGF.EmitNullInitialization(NewPtr, ElementType);
-      
-    CGF.EmitCXXConstructorCall(Ctor, Ctor_Complete, /*ForVirtualBase=*/false, 
-                               NewPtr, E->constructor_arg_begin(),
-                               E->constructor_arg_end());
-
+    CGF.EmitNewArrayInitializer(E, ElementType, NewPtr, NumElements);
     return;
   }
-  // We have a POD type.
-  if (E->getNumConstructorArgs() == 0)
+
+  if (!Init)
     return;
-  
+
   StoreAnyExprIntoOneUnit(CGF, E, NewPtr);
 }
 
@@ -966,7 +945,7 @@ namespace {
         DeleteArgs.add(getPlacementArgs()[I], *AI++);
 
       // Call 'operator delete'.
-      CGF.EmitCall(CGF.CGM.getTypes().getFunctionInfo(DeleteArgs, FPT),
+      CGF.EmitCall(CGF.CGM.getTypes().arrangeFunctionCall(DeleteArgs, FPT),
                    CGF.CGM.GetAddrOfFunction(OperatorDelete),
                    ReturnValueSlot(), DeleteArgs, OperatorDelete);
     }
@@ -1027,7 +1006,7 @@ namespace {
       }
 
       // Call 'operator delete'.
-      CGF.EmitCall(CGF.CGM.getTypes().getFunctionInfo(DeleteArgs, FPT),
+      CGF.EmitCall(CGF.CGM.getTypes().arrangeFunctionCall(DeleteArgs, FPT),
                    CGF.CGM.GetAddrOfFunction(OperatorDelete),
                    ReturnValueSlot(), DeleteArgs, OperatorDelete);
     }
@@ -1134,7 +1113,8 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
     // TODO: kill any unnecessary computations done for the size
     // argument.
   } else {
-    RV = EmitCall(CGM.getTypes().getFunctionInfo(allocatorArgs, allocatorType),
+    RV = EmitCall(CGM.getTypes().arrangeFunctionCall(allocatorArgs,
+                                                     allocatorType),
                   CGM.GetAddrOfFunction(allocator), ReturnValueSlot(),
                   allocatorArgs, allocator);
   }
@@ -1145,7 +1125,7 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
   // CXXNewExpr::shouldNullCheckAllocation()) and we have an
   // interesting initializer.
   bool nullCheck = allocatorType->isNothrow(getContext()) &&
-    !(allocType.isPODType(getContext()) && !E->hasInitializer());
+    (!allocType.isPODType(getContext()) || E->hasInitializer());
 
   llvm::BasicBlock *nullCheckBB = 0;
   llvm::BasicBlock *contBB = 0;
@@ -1211,7 +1191,7 @@ llvm::Value *CodeGenFunction::EmitCXXNewExpr(const CXXNewExpr *E) {
     DeactivateCleanupBlock(operatorDeleteCleanup, cleanupDominator);
     cleanupDominator->eraseFromParent();
   }
-  
+
   if (nullCheck) {
     conditional.end(*this);
 
@@ -1257,7 +1237,7 @@ void CodeGenFunction::EmitDeleteCall(const FunctionDecl *DeleteFD,
     DeleteArgs.add(RValue::get(Size), SizeTy);
 
   // Emit the call to delete.
-  EmitCall(CGM.getTypes().getFunctionInfo(DeleteArgs, DeleteFTy),
+  EmitCall(CGM.getTypes().arrangeFunctionCall(DeleteArgs, DeleteFTy),
            CGM.GetAddrOfFunction(DeleteFD), ReturnValueSlot(), 
            DeleteArgs, DeleteFD);
 }
@@ -1304,9 +1284,8 @@ static void EmitObjectDelete(CodeGenFunction &CGF,
         }
         
         llvm::Type *Ty =
-          CGF.getTypes().GetFunctionType(CGF.getTypes().getFunctionInfo(Dtor,
-                                                               Dtor_Complete),
-                                         /*isVariadic=*/false);
+          CGF.getTypes().GetFunctionType(
+                         CGF.getTypes().arrangeCXXDestructor(Dtor, Dtor_Complete));
           
         llvm::Value *Callee
           = CGF.BuildVirtualCall(Dtor, 
@@ -1414,7 +1393,7 @@ namespace {
       }
 
       // Emit the call to delete.
-      CGF.EmitCall(CGF.getTypes().getFunctionInfo(Args, DeleteFTy),
+      CGF.EmitCall(CGF.getTypes().arrangeFunctionCall(Args, DeleteFTy),
                    CGF.CGM.GetAddrOfFunction(OperatorDelete),
                    ReturnValueSlot(), Args, OperatorDelete);
     }
