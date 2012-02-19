@@ -6515,7 +6515,8 @@ class CGObjCJit : public CGObjCRuntime {
 
 
 CGObjCJit::CGObjCJit(CodeGen::CodeGenModule &cgm)
-    : isUsable(false),
+    : CGObjCRuntime(cgm),
+      isUsable(false),
       CGM(cgm), 
       VMContext(cgm.getLLVMContext()),
       ObjCTypes(cgm),
@@ -6894,14 +6895,12 @@ llvm::Function *CGObjCJit::GenerateMethod(const ObjCMethodDecl *OMD,
 
   CodeGenTypes &Types = CGM.getTypes();
   llvm::FunctionType *MethodTy =
-    Types.GetFunctionType(Types.getFunctionInfo(OMD), OMD->isVariadic());
-
+    Types.GetFunctionType(Types.arrangeObjCMethodDeclaration(OMD));
   llvm::Function *Method =
     llvm::Function::Create(MethodTy,
                            llvm::GlobalValue::InternalLinkage,
                            Name.str(),
                            &CGM.getModule());
-
   MethodDefinitions.insert(std::make_pair(OMD, Method));
 
   return Method;
@@ -7190,9 +7189,6 @@ CGObjCJit::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
   ActualArgs.add(RValue::get(Arg1), CGF.getContext().getObjCSelType());
   ActualArgs.addFrom(CallArgs);
 
-  CodeGenTypes &Types = CGM.getTypes();
-  const CGFunctionInfo &FnInfo = Types.getFunctionInfo(ResultType, ActualArgs,
-                                                       FunctionType::ExtInfo());
   if (Method)
     assert(CGM.getContext().getCanonicalType(Method->getResultType()) ==
            CGM.getContext().getCanonicalType(ResultType) &&
@@ -7227,7 +7223,9 @@ CGObjCJit::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
 
   llvm::Value *theImp = CGF.Builder.CreateBitCast(getImp, ImpTy);
 
-  return CGF.EmitCall(FnInfo, theImp, Return, ActualArgs);
+  MessageSendInfo MSI = getMessageSendInfo(Method, ResultType, ActualArgs);
+  return CGF.EmitCall(MSI.CallInfo, theImp, Return, ActualArgs);
+//  return CGF.EmitCall(FnInfo, theImp, Return, ActualArgs);
 }
 
 
