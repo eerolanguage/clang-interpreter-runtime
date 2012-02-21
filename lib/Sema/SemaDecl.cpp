@@ -6101,7 +6101,8 @@ void Sema::AddInitializerToDecl(Decl *RealDecl, Expr *Init,
     }
     VDecl->setTypeSourceInfo(DeducedType);
     VDecl->setType(DeducedType->getType());
-
+    VDecl->ClearLinkageCache();
+    
     // In ARC, infer lifetime.
     if (getLangOptions().ObjCAutoRefCount && inferObjCARCLifetime(VDecl))
       VDecl->setInvalidDecl();
@@ -9584,6 +9585,8 @@ void Sema::ActOnFields(Scope* S,
         // Only it is in implementation's lexical context.
         ClsFields[I]->setLexicalDeclContext(IMPDecl);
       CheckImplementationIvars(IMPDecl, ClsFields, RecFields.size(), RBrac);
+      IMPDecl->setIvarLBraceLoc(LBrac);
+      IMPDecl->setIvarRBraceLoc(RBrac);
     } else if (ObjCCategoryDecl *CDecl = 
                 dyn_cast<ObjCCategoryDecl>(EnclosingDecl)) {
       // case of ivars in class extension; all other cases have been
@@ -9617,6 +9620,8 @@ void Sema::ActOnFields(Scope* S,
         ClsFields[i]->setLexicalDeclContext(CDecl);
         CDecl->addDecl(ClsFields[i]);
       }
+      CDecl->setIvarLBraceLoc(LBrac);
+      CDecl->setIvarRBraceLoc(RBrac);
     }
   }
 

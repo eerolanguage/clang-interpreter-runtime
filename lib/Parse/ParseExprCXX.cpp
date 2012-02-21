@@ -886,8 +886,7 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
   BodyScope.Exit();
 
   if (!Stmt.isInvalid())
-    return Actions.ActOnLambdaExpr(LambdaBeginLoc, Stmt.take(),
-                                   getCurScope());
+    return Actions.ActOnLambdaExpr(LambdaBeginLoc, Stmt.take(), getCurScope());
  
   Actions.ActOnLambdaError(LambdaBeginLoc, getCurScope());
   return ExprError();
@@ -1714,6 +1713,7 @@ bool Parser::ParseUnqualifiedIdTemplateId(CXXScopeSpec &SS,
     }
 
     TemplateId->SS = SS;
+    TemplateId->TemplateKWLoc = TemplateKWLoc;
     TemplateId->Template = Template;
     TemplateId->Kind = TNK;
     TemplateId->LAngleLoc = LAngleLoc;

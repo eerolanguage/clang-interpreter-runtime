@@ -516,13 +516,9 @@ bool Sema::MergeCXXFunctionDecl(FunctionDecl *New, FunctionDecl *Old) {
     }
   }
 
-  // C++0x [dcl.constexpr]p1: If any declaration of a function or function
+  // C++11 [dcl.constexpr]p1: If any declaration of a function or function
   // template has a constexpr specifier then all its declarations shall
-  // contain the constexpr specifier. [Note: An explicit specialization can
-  // differ from the template declaration with respect to the constexpr
-  // specifier. -- end note]
-  //
-  // FIXME: Don't reject changes in constexpr in explicit specializations.
+  // contain the constexpr specifier.
   if (New->isConstexpr() != Old->isConstexpr()) {
     Diag(New->getLocation(), diag::err_constexpr_redecl_mismatch)
       << New << New->isConstexpr();
@@ -1643,6 +1639,10 @@ Sema::ActOnCXXInClassMemberInitializer(Decl *D, SourceLocation EqualLoc,
 
   ExprResult Init = InitExpr;
   if (!FD->getType()->isDependentType() && !InitExpr->isTypeDependent()) {
+    if (isa<InitListExpr>(InitExpr) && isStdInitializerList(FD->getType(), 0)) {
+    Diag(FD->getLocation(), diag::warn_dangling_std_initializer_list)
+        << /*at end of ctor*/1 << InitExpr->getSourceRange();
+    }
     // FIXME: if there is no EqualLoc, this is list-initialization.
     Init = PerformCopyInitialization(
       InitializedEntity::InitializeMember(FD), EqualLoc, InitExpr);
@@ -2112,6 +2112,11 @@ Sema::BuildMemberInitializer(ValueDecl *Member, Expr *Init,
       InitList = true;
       Args = &Init;
       NumArgs = 1;
+
+      if (isStdInitializerList(Member->getType(), 0)) {
+        Diag(IdLoc, diag::warn_dangling_std_initializer_list)
+            << /*at end of ctor*/1 << InitRange;
+      }
     }
 
     // Initialize the member.
@@ -10389,6 +10394,14 @@ bool Sema::CheckPureMethod(CXXMethodDecl *Method, SourceRange InitRange) {
   return true;
 }
 
+/// \brief Determine whether the given declaration is a static data member.
+static bool isStaticDataMember(Decl *D) {
+  VarDecl *Var = dyn_cast_or_null<VarDecl>(D);
+  if (!Var)
+    return false;
+  
+  return Var->isStaticDataMember();
+}
 /// ActOnCXXEnterDeclInitializer - Invoked when we are about to parse
 /// an initializer for the out-of-line declaration 'Dcl'.  The scope
 /// is a fresh scope pushed for just this purpose.
@@ -10404,6 +10417,12 @@ void Sema::ActOnCXXEnterDeclInitializer(Scope *S, Decl *D) {
   //   int foo::bar;
   assert(D->isOutOfLine());
   EnterDeclaratorContext(S, D->getDeclContext());
+  
+  // If we are parsing the initializer for a static data member, push a
+  // new expression evaluation context that is associated with this static
+  // data member.
+  if (isStaticDataMember(D))
+    PushExpressionEvaluationContext(PotentiallyEvaluated, D);
 }
 
 /// ActOnCXXExitDeclInitializer - Invoked after we are finished parsing an
@@ -10411,6 +10430,9 @@ void Sema::ActOnCXXEnterDeclInitializer(Scope *S, Decl *D) {
 void Sema::ActOnCXXExitDeclInitializer(Scope *S, Decl *D) {
   // If there is no declaration, there was an error parsing it.
   if (D == 0 || D->isInvalidDecl()) return;
+
+  if (isStaticDataMember(D))
+    PopExpressionEvaluationContext();  
 
   assert(D->isOutOfLine());
   ExitDeclaratorContext(S);
