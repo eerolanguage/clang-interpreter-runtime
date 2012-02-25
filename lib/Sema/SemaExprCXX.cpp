@@ -3212,6 +3212,126 @@ ExprResult Sema::ActOnBinaryTypeTrait(BinaryTypeTrait BTT,
   return BuildBinaryTypeTrait(BTT, KWLoc, LhsTSInfo, RhsTSInfo, RParen);
 }
 
+static bool evaluateTypeTrait(Sema &S, TypeTrait Kind, SourceLocation KWLoc,
+                              ArrayRef<TypeSourceInfo *> Args,
+                              SourceLocation RParenLoc) {
+  switch (Kind) {
+  case clang::TT_IsTriviallyConstructible: {
+    // C++11 [meta.unary.prop]:
+    //   is_trivially_constructible is defined as:
+    //
+    //     is_constructible<T, Args...>::value is true and the variable
+    //     definition for is_constructible, as defined below, is known to call no
+    //     operation that is not trivial.
+    //
+    //   The predicate condition for a template specialization 
+    //   is_constructible<T, Args...> shall be satisfied if and only if the 
+    //   following variable definition would be well-formed for some invented 
+    //   variable t:
+    //
+    //     T t(create<Args>()...);
+    if (Args.empty()) {
+      S.Diag(KWLoc, diag::err_type_trait_arity)
+        << 1 << 1 << 1 << (int)Args.size();
+      return false;
+    }
+    
+    bool SawVoid = false;
+    for (unsigned I = 0, N = Args.size(); I != N; ++I) {
+      if (Args[I]->getType()->isVoidType()) {
+        SawVoid = true;
+        continue;
+      }
+      
+      if (!Args[I]->getType()->isIncompleteType() &&
+        S.RequireCompleteType(KWLoc, Args[I]->getType(), 
+          diag::err_incomplete_type_used_in_type_trait_expr))
+        return false;
+    }
+    
+    // If any argument was 'void', of course it won't type-check.
+    if (SawVoid)
+      return false;
+    
+    llvm::SmallVector<OpaqueValueExpr, 2> OpaqueArgExprs;
+    llvm::SmallVector<Expr *, 2> ArgExprs;
+    ArgExprs.reserve(Args.size() - 1);
+    for (unsigned I = 1, N = Args.size(); I != N; ++I) {
+      QualType T = Args[I]->getType();
+      if (T->isObjectType() || T->isFunctionType())
+        T = S.Context.getRValueReferenceType(T);
+      OpaqueArgExprs.push_back(
+        OpaqueValueExpr(Args[I]->getTypeLoc().getSourceRange().getBegin(), 
+                        T.getNonLValueExprType(S.Context),
+                        Expr::getValueKindForType(T)));
+      ArgExprs.push_back(&OpaqueArgExprs.back());
+    }
+    
+    // Perform the initialization in an unevaluated context within a SFINAE 
+    // trap at translation unit scope.
+    EnterExpressionEvaluationContext Unevaluated(S, Sema::Unevaluated);
+    Sema::SFINAETrap SFINAE(S, /*AccessCheckingSFINAE=*/true);
+    Sema::ContextRAII TUContext(S, S.Context.getTranslationUnitDecl());
+    InitializedEntity To(InitializedEntity::InitializeTemporary(Args[0]));
+    InitializationKind InitKind(InitializationKind::CreateDirect(KWLoc, KWLoc,
+                                                                 RParenLoc));
+    InitializationSequence Init(S, To, InitKind, 
+                                ArgExprs.begin(), ArgExprs.size());
+    if (Init.Failed())
+      return false;
+    
+    ExprResult Result = Init.Perform(S, To, InitKind, 
+                                     MultiExprArg(ArgExprs.data(), 
+                                                  ArgExprs.size()));
+    if (Result.isInvalid() || SFINAE.hasErrorOccurred())
+      return false;
+    
+    // The initialization succeeded; not make sure there are no non-trivial 
+    // calls.
+    return !Result.get()->hasNonTrivialCall(S.Context);
+  }
+  }
+  
+  return false;
+}
+
+ExprResult Sema::BuildTypeTrait(TypeTrait Kind, SourceLocation KWLoc, 
+                                ArrayRef<TypeSourceInfo *> Args, 
+                                SourceLocation RParenLoc) {
+  bool Dependent = false;
+  for (unsigned I = 0, N = Args.size(); I != N; ++I) {
+    if (Args[I]->getType()->isDependentType()) {
+      Dependent = true;
+      break;
+    }
+  }
+  
+  bool Value = false;
+  if (!Dependent)
+    Value = evaluateTypeTrait(*this, Kind, KWLoc, Args, RParenLoc);
+  
+  return TypeTraitExpr::Create(Context, Context.BoolTy, KWLoc, Kind,
+                               Args, RParenLoc, Value);
+}
+
+ExprResult Sema::ActOnTypeTrait(TypeTrait Kind, SourceLocation KWLoc, 
+                                ArrayRef<ParsedType> Args, 
+                                SourceLocation RParenLoc) {
+  llvm::SmallVector<TypeSourceInfo *, 4> ConvertedArgs;
+  ConvertedArgs.reserve(Args.size());
+  
+  for (unsigned I = 0, N = Args.size(); I != N; ++I) {
+    TypeSourceInfo *TInfo;
+    QualType T = GetTypeFromParser(Args[I], &TInfo);
+    if (!TInfo)
+      TInfo = Context.getTrivialTypeSourceInfo(T, KWLoc);
+    
+    ConvertedArgs.push_back(TInfo);    
+  }
+  
+  return BuildTypeTrait(Kind, KWLoc, ConvertedArgs, RParenLoc);
+}
+
 static bool EvaluateBinaryTypeTrait(Sema &Self, BinaryTypeTrait BTT,
                                     QualType LhsT, QualType RhsT,
                                     SourceLocation KeyLoc) {
@@ -3301,6 +3421,54 @@ static bool EvaluateBinaryTypeTrait(Sema &Self, BinaryTypeTrait BTT,
     ExprResult Result = Init.Perform(Self, To, Kind, MultiExprArg(&FromPtr, 1));
     return !Result.isInvalid() && !SFINAE.hasErrorOccurred();
   }
+      
+  case BTT_IsTriviallyAssignable: {
+    // C++11 [meta.unary.prop]p3:
+    //   is_trivially_assignable is defined as:
+    //     is_assignable<T, U>::value is true and the assignment, as defined by
+    //     is_assignable, is known to call no operation that is not trivial
+    //
+    //   is_assignable is defined as:
+    //     The expression declval<T>() = declval<U>() is well-formed when 
+    //     treated as an unevaluated operand (Clause 5).
+    //
+    //   For both, T and U shall be complete types, (possibly cv-qualified) 
+    //   void, or arrays of unknown bound.
+    if (!LhsT->isVoidType() && !LhsT->isIncompleteArrayType() &&
+        Self.RequireCompleteType(KeyLoc, LhsT, 
+          diag::err_incomplete_type_used_in_type_trait_expr))
+      return false;
+    if (!RhsT->isVoidType() && !RhsT->isIncompleteArrayType() &&
+        Self.RequireCompleteType(KeyLoc, RhsT, 
+          diag::err_incomplete_type_used_in_type_trait_expr))
+      return false;
+
+    // cv void is never assignable.
+    if (LhsT->isVoidType() || RhsT->isVoidType())
+      return false;
+
+    // Build expressions that emulate the effect of declval<T>() and 
+    // declval<U>().
+    if (LhsT->isObjectType() || LhsT->isFunctionType())
+      LhsT = Self.Context.getRValueReferenceType(LhsT);
+    if (RhsT->isObjectType() || RhsT->isFunctionType())
+      RhsT = Self.Context.getRValueReferenceType(RhsT);
+    OpaqueValueExpr Lhs(KeyLoc, LhsT.getNonLValueExprType(Self.Context),
+                        Expr::getValueKindForType(LhsT));
+    OpaqueValueExpr Rhs(KeyLoc, RhsT.getNonLValueExprType(Self.Context),
+                        Expr::getValueKindForType(RhsT));
+    
+    // Attempt the assignment in an unevaluated context within a SFINAE 
+    // trap at translation unit scope.
+    EnterExpressionEvaluationContext Unevaluated(Self, Sema::Unevaluated);
+    Sema::SFINAETrap SFINAE(Self, /*AccessCheckingSFINAE=*/true);
+    Sema::ContextRAII TUContext(Self, Self.Context.getTranslationUnitDecl());
+    ExprResult Result = Self.BuildBinOp(/*S=*/0, KeyLoc, BO_Assign, &Lhs, &Rhs);
+    if (Result.isInvalid() || SFINAE.hasErrorOccurred())
+      return false;
+
+    return !Result.get()->hasNonTrivialCall(Self.Context);
+  }
   }
   llvm_unreachable("Unknown type trait or not implemented");
 }
@@ -3333,6 +3501,7 @@ ExprResult Sema::BuildBinaryTypeTrait(BinaryTypeTrait BTT,
   case BTT_IsSame:         ResultType = Context.BoolTy; break;
   case BTT_TypeCompatible: ResultType = Context.IntTy; break;
   case BTT_IsConvertibleTo: ResultType = Context.BoolTy; break;
+  case BTT_IsTriviallyAssignable: ResultType = Context.BoolTy;
   }
 
   return Owned(new (Context) BinaryTypeTraitExpr(KWLoc, BTT, LhsTSInfo,

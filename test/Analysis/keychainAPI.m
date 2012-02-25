@@ -274,8 +274,8 @@ void DellocWithCFStringCreate2(CFAllocatorRef alloc) {
   char * x;
   st = SecKeychainItemCopyContent(2, ptr, ptr, &length, &bytes);
   if (st == noErr) {
-    CFStringRef userStr = CFStringCreateWithBytesNoCopy(alloc, bytes, length, 5, 0, kCFAllocatorNull); // expected-warning{{Allocated data is not released}}
-    CFRelease(userStr);
+    CFStringRef userStr = CFStringCreateWithBytesNoCopy(alloc, bytes, length, 5, 0, kCFAllocatorNull); 
+    CFRelease(userStr); // expected-warning{{Allocated data is not released}}
   }
 }
 
@@ -370,9 +370,18 @@ void allocAndFree1() {
       my_FreeParam(ptr, outData);
 }
 
-void allocNoFree2() {
+void consumeChar(char);
+
+void allocNoFree2(int x) {
     OSStatus st = 0;
-    void *outData = my_AllocateReturn(&st); // expected-warning{{Allocated data is not released:}}
+    void *outData = my_AllocateReturn(&st); 
+    if (x) {
+      consumeChar(*(char*)outData); // expected-warning{{Allocated data is not released:}}
+      return;
+    } else {
+      consumeChar(*(char*)outData);
+    }
+    return;
 }
 
 void allocAndFree2(void *attrList) {

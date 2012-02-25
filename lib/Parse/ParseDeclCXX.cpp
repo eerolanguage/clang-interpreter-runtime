@@ -653,6 +653,9 @@ SourceLocation Parser::ParseDecltypeSpecifier(DeclSpec &DS) {
       return EndLoc;
     }
   } else {
+    if (Tok.getIdentifierInfo()->isStr("decltype"))
+      Diag(Tok, diag::warn_cxx98_compat_decltype);
+
     ConsumeToken();
 
     BalancedDelimiterTracker T(*this, tok::l_paren);
@@ -2248,6 +2251,16 @@ void Parser::ParseCXXMemberSpecification(SourceLocation RecordLoc,
           << DeclSpec::getSpecifierName((DeclSpec::TST)TagType)
           << FixItHint::CreateRemoval(Tok.getLocation());
         ConsumeToken();
+        continue;
+      }
+
+      if (Tok.is(tok::annot_pragma_vis)) {
+        HandlePragmaVisibility();
+        continue;
+      }
+
+      if (Tok.is(tok::annot_pragma_pack)) {
+        HandlePragmaPack();
         continue;
       }
 

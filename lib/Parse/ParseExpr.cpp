@@ -1140,8 +1140,12 @@ ExprResult Parser::ParseCastExpression(bool isUnaryExpression,
   case tok::kw___is_same:
   case tok::kw___is_convertible:
   case tok::kw___is_convertible_to:
+  case tok::kw___is_trivially_assignable:
     return ParseBinaryTypeTrait();
 
+  case tok::kw___is_trivially_constructible:
+    return ParseTypeTrait();
+      
   case tok::kw___array_rank:
   case tok::kw___array_extent:
     return ParseArrayTypeTrait();

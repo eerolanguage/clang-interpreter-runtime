@@ -1545,13 +1545,21 @@ static const char *getTypeTraitName(UnaryTypeTrait UTT) {
 
 static const char *getTypeTraitName(BinaryTypeTrait BTT) {
   switch (BTT) {
-  case BTT_IsBaseOf:         return "__is_base_of";
-  case BTT_IsConvertible:    return "__is_convertible";
-  case BTT_IsSame:           return "__is_same";
-  case BTT_TypeCompatible:   return "__builtin_types_compatible_p";
-  case BTT_IsConvertibleTo:  return "__is_convertible_to";
+  case BTT_IsBaseOf:              return "__is_base_of";
+  case BTT_IsConvertible:         return "__is_convertible";
+  case BTT_IsSame:                return "__is_same";
+  case BTT_TypeCompatible:        return "__builtin_types_compatible_p";
+  case BTT_IsConvertibleTo:       return "__is_convertible_to";
+  case BTT_IsTriviallyAssignable: return "__is_trivially_assignable";
   }
   llvm_unreachable("Binary type trait not covered by switch");
+}
+
+static const char *getTypeTraitName(TypeTrait TT) {
+  switch (TT) {
+  case clang::TT_IsTriviallyConstructible:return "__is_trivially_constructible";
+  }
+  llvm_unreachable("Type trait not covered by switch");
 }
 
 static const char *getTypeTraitName(ArrayTypeTrait ATT) {
@@ -1579,6 +1587,16 @@ void StmtPrinter::VisitBinaryTypeTraitExpr(BinaryTypeTraitExpr *E) {
   OS << getTypeTraitName(E->getTrait()) << "("
      << E->getLhsType().getAsString(Policy) << ","
      << E->getRhsType().getAsString(Policy) << ")";
+}
+
+void StmtPrinter::VisitTypeTraitExpr(TypeTraitExpr *E) {
+  OS << getTypeTraitName(E->getTrait()) << "(";
+  for (unsigned I = 0, N = E->getNumArgs(); I != N; ++I) {
+    if (I > 0)
+      OS << ", ";
+    OS << E->getArg(I)->getType().getAsString(Policy);
+  }
+  OS << ")";
 }
 
 void StmtPrinter::VisitArrayTypeTraitExpr(ArrayTypeTraitExpr *E) {
