@@ -132,7 +132,11 @@ def warn_unused_variable : Warning<"unused variable %0">,
 def warn_unused_exception_param : Warning<"unused exception parameter %0">,
   InGroup<UnusedExceptionParameter>, DefaultIgnore;
 def warn_decl_in_param_list : Warning<
-  "declaration of %0 will not be visible outside of this function">;
+  "declaration of %0 will not be visible outside of this function">,
+  InGroup<Visibility>;
+def warn_redefinition_in_param_list : Warning<
+  "redefinition of %0 will not be visible outside of this function">,
+  InGroup<Visibility>;
 def warn_empty_parens_are_function_decl : Warning<
   "empty parentheses interpreted as a function declaration">,
   InGroup<VexingParse>;
@@ -538,7 +542,7 @@ def warn_strict_multiple_method_decl : Warning<
   "multiple methods named %0 found">, InGroup<StrictSelector>, DefaultIgnore;
 def warn_accessor_property_type_mismatch : Warning<
   "type of property %0 does not match type of accessor %1">;
-def note_method_declared_at : Note<"method declared here">;
+def note_method_declared_at : Note<"method %0 declared here">;
 def err_setter_type_void : Error<"type of setter must be void">;
 def err_duplicate_method_decl : Error<"duplicate declaration of method %0">;
 def warn_duplicate_method_decl : 
@@ -679,7 +683,7 @@ def warn_auto_implicit_atomic_property : Warning<
 def warn_unimplemented_selector:  Warning<
   "unimplemented selector %0">, InGroup<Selector>, DefaultIgnore;
 def warn_unimplemented_protocol_method : Warning<
-  "method in protocol not implemented">, InGroup<Protocol>;
+  "method %0 in protocol not implemented">, InGroup<Protocol>;
 
 // C++ declarations
 def err_static_assert_expression_is_not_constant : Error<
@@ -3426,6 +3430,12 @@ def warn_self_assignment : Warning<
   "explicitly assigning a variable of type %0 to itself">,
   InGroup<SelfAssignment>, DefaultIgnore;
 
+def warn_string_plus_int : Warning<
+  "adding %0 to a string does not append to the string">,
+  InGroup<StringPlusInt>;
+def note_string_plus_int_silence : Note<
+  "use array indexing to silence this warning">;
+
 def warn_sizeof_array_param : Warning<
   "sizeof on array function parameter will return size of %0 instead of %1">,
   InGroup<SizeofArrayArgument>;
@@ -4197,7 +4207,8 @@ def ext_typecheck_convert_pointer_int : ExtWarn<
   "%select{|dereference with *|"
   "take the address with &|"
   "remove *|"
-  "remove &}3">;
+  "remove &}3">,
+  InGroup<IntConversions>;
 def ext_typecheck_convert_int_pointer : ExtWarn<
   "incompatible integer to pointer conversion "
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
@@ -4207,7 +4218,8 @@ def ext_typecheck_convert_int_pointer : ExtWarn<
   "%select{|dereference with *|"
   "take the address with &|"
   "remove *|"
-  "remove &}3">;
+  "remove &}3">,
+  InGroup<IntConversions>;
 def ext_typecheck_convert_pointer_void_func : Extension<
   "%select{assigning to|passing|returning|converting|initializing|sending|casting}2"
   " %0 "

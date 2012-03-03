@@ -1082,7 +1082,7 @@ public:
 
   virtual void GenerateClass(const ObjCImplementationDecl *ClassDecl);
 
-  virtual void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {};
+  virtual void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {}
 
   virtual llvm::Value *GenerateProtocolRef(CGBuilderTy &Builder,
                                            const ObjCProtocolDecl *PD);
@@ -1337,7 +1337,7 @@ public:
 
   virtual void GenerateClass(const ObjCImplementationDecl *ClassDecl);
 
-  virtual void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {};
+  virtual void RegisterAlias(const ObjCCompatibleAliasDecl *OAD) {}
 
   virtual llvm::Value *GenerateProtocolRef(CGBuilderTy &Builder,
                                            const ObjCProtocolDecl *PD);

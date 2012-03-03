@@ -42,10 +42,8 @@ public:
   RefState(Kind k, const Stmt *s) : K(k), S(s) {}
 
   bool isAllocated() const { return K == AllocateUnchecked; }
-  //bool isFailed() const { return K == AllocateFailed; }
   bool isReleased() const { return K == Released; }
-  //bool isEscaped() const { return K == Escaped; }
-  //bool isRelinquished() const { return K == Relinquished; }
+
   const Stmt *getStmt() const { return S; }
 
   bool operator==(const RefState &X) const {
@@ -444,12 +442,16 @@ ProgramStateRef MallocChecker::FreeMemAttr(CheckerContext &C,
   if (Att->getModule() != "malloc")
     return 0;
 
+  ProgramStateRef State = C.getState();
+
   for (OwnershipAttr::args_iterator I = Att->args_begin(), E = Att->args_end();
        I != E; ++I) {
-    return FreeMemAux(C, CE, C.getState(), *I,
-                      Att->getOwnKind() == OwnershipAttr::Holds);
+    ProgramStateRef StateI = FreeMemAux(C, CE, State, *I,
+                               Att->getOwnKind() == OwnershipAttr::Holds);
+    if (StateI)
+      State = StateI;
   }
-  return 0;
+  return State;
 }
 
 ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
@@ -775,6 +777,7 @@ ProgramStateRef MallocChecker::CallocMem(CheckerContext &C, const CallExpr *CE){
 const Stmt *
 MallocChecker::getAllocationSite(const ExplodedNode *N, SymbolRef Sym,
                                  CheckerContext &C) const {
+  const LocationContext *LeakContext = N->getLocationContext();
   // Walk the ExplodedGraph backwards and find the first node that referred to
   // the tracked symbol.
   const ExplodedNode *AllocNode = N;
@@ -782,12 +785,18 @@ MallocChecker::getAllocationSite(const ExplodedNode *N, SymbolRef Sym,
   while (N) {
     if (!N->getState()->get<RegionState>(Sym))
       break;
-    AllocNode = N;
+    // Allocation node, is the last node in the current context in which the
+    // symbol was tracked.
+    if (N->getLocationContext() == LeakContext)
+      AllocNode = N;
     N = N->pred_empty() ? NULL : *(N->pred_begin());
   }
 
   ProgramPoint P = AllocNode->getLocation();
-  return cast<clang::PostStmt>(P).getStmt();
+  if (!isa<StmtPoint>(P))
+    return 0;
+
+  return cast<StmtPoint>(P).getStmt();
 }
 
 void MallocChecker::reportLeak(SymbolRef Sym, ExplodedNode *N,
@@ -806,10 +815,10 @@ void MallocChecker::reportLeak(SymbolRef Sym, ExplodedNode *N,
   // Most bug reports are cached at the location where they occurred.
   // With leaks, we want to unique them by the location where they were
   // allocated, and only report a single path.
-  const Stmt *AllocStmt = getAllocationSite(N, Sym, C);
-  PathDiagnosticLocation LocUsedForUniqueing =
-    PathDiagnosticLocation::createBegin(AllocStmt, C.getSourceManager(),
-                                        N->getLocationContext());
+  PathDiagnosticLocation LocUsedForUniqueing;
+  if (const Stmt *AllocStmt = getAllocationSite(N, Sym, C))
+    LocUsedForUniqueing = PathDiagnosticLocation::createBegin(AllocStmt,
+                            C.getSourceManager(), N->getLocationContext());
 
   BugReport *R = new BugReport(*BT_Leak,
     "Memory is never released; potential memory leak", N, LocUsedForUniqueing);
@@ -1087,14 +1096,69 @@ bool MallocChecker::doesNotFreeMemory(const CallOrObjCMessage *Call,
   if (!SM.isInSystemHeader(D->getLocation()))
     return false;
 
-  // Process C functions.
+  // Process C/ObjC functions.
   if (const FunctionDecl *FD  = dyn_cast_or_null<FunctionDecl>(D)) {
     // White list the system functions whose arguments escape.
     const IdentifierInfo *II = FD->getIdentifier();
-    if (II) {
-      StringRef FName = II->getName();
-      if (FName.equals("pthread_setspecific"))
+    if (!II)
+      return true;
+    StringRef FName = II->getName();
+
+    // White list thread local storage.
+    if (FName.equals("pthread_setspecific"))
+      return false;
+
+    // White list the 'XXXNoCopy' ObjC Methods.
+    if (FName.endswith("NoCopy")) {
+      // Look for the deallocator argument. We know that the memory ownership
+      // is not transfered only if the deallocator argument is
+      // 'kCFAllocatorNull'.
+      for (unsigned i = 1; i < Call->getNumArgs(); ++i) {
+        const Expr *ArgE = Call->getArg(i)->IgnoreParenCasts();
+        if (const DeclRefExpr *DE = dyn_cast<DeclRefExpr>(ArgE)) {
+          StringRef DeallocatorName = DE->getFoundDecl()->getName();
+          if (DeallocatorName == "kCFAllocatorNull")
+            return true;
+        }
+      }
+      return false;
+    }
+
+    // PR12101
+    // Many CoreFoundation and CoreGraphics might allow a tracked object 
+    // to escape.
+    if (Call->isCFCGAllowingEscape(FName))
+      return false;
+
+    // Associating streams with malloced buffers. The pointer can escape if
+    // 'closefn' is specified (and if that function does free memory).
+    // Currently, we do not inspect the 'closefn' function (PR12101).
+    if (FName == "funopen")
+      if (Call->getNumArgs() >= 4 && !Call->getArgSVal(4).isConstant(0))
         return false;
+
+    // Do not warn on pointers passed to 'setbuf' when used with std streams,
+    // these leaks might be intentional when setting the buffer for stdio.
+    // http://stackoverflow.com/questions/2671151/who-frees-setvbuf-buffer
+    if (FName == "setbuf" || FName =="setbuffer" ||
+        FName == "setlinebuf" || FName == "setvbuf") {
+      if (Call->getNumArgs() >= 1)
+        if (const DeclRefExpr *Arg =
+              dyn_cast<DeclRefExpr>(Call->getArg(0)->IgnoreParenCasts()))
+          if (const VarDecl *D = dyn_cast<VarDecl>(Arg->getDecl()))
+              if (D->getCanonicalDecl()->getName().find("std")
+                                                   != StringRef::npos)
+                return false;
+    }
+
+    // A bunch of other functions, which take ownership of a pointer (See retain
+    // release checker). Not all the parameters here are invalidated, but the
+    // Malloc checker cannot differentiate between them. The right way of doing
+    // this would be to implement a pointer escapes callback.
+    if (FName == "CVPixelBufferCreateWithBytes" ||
+        FName == "CGBitmapContextCreateWithData" ||
+        FName == "CVPixelBufferCreateWithPlanarBytes") {
+      return false;
     }
 
     // Otherwise, assume that the function does not free memory.

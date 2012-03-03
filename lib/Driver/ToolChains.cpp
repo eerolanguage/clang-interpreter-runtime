@@ -1019,6 +1019,10 @@ bool Darwin::SupportsObjCGC() const {
   return !isTargetIPhoneOS();
 }
 
+bool Darwin::SupportsObjCARC() const {
+  return isTargetIPhoneOS() || !isMacosxVersionLT(10, 6);
+}
+
 std::string
 Darwin_Generic_GCC::ComputeEffectiveClangTriple(const ArgList &Args,
                                                 types::ID InputType) const {
@@ -1219,6 +1223,7 @@ Generic_GCC::GCCInstallationDetector::GCCInstallationDetector(
   };
   static const char *const PPC64LibDirs[] = { "/lib64", "/lib" };
   static const char *const PPC64Triples[] = {
+    "powerpc64-linux-gnu",
     "powerpc64-unknown-linux-gnu",
     "powerpc64-suse-linux",
     "ppc64-redhat-linux"
@@ -1962,6 +1967,14 @@ static std::string getMultiarchTriple(const llvm::Triple TargetTriple,
     if (llvm::sys::fs::exists(SysRoot + "/lib/mipsel-linux-gnu"))
       return "mipsel-linux-gnu";
     return TargetTriple.str();
+  case llvm::Triple::ppc:
+    if (llvm::sys::fs::exists(SysRoot + "/lib/powerpc-linux-gnu"))
+      return "powerpc-linux-gnu";
+    return TargetTriple.str();
+  case llvm::Triple::ppc64:
+    if (llvm::sys::fs::exists(SysRoot + "/lib/powerpc64-linux-gnu"))
+      return "powerpc64-linux-gnu";
+    return TargetTriple.str();
   }
 }
 
@@ -2171,6 +2184,12 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
   const StringRef MIPSELMultiarchIncludeDirs[] = {
     "/usr/include/mipsel-linux-gnu"
   };
+  const StringRef PPCMultiarchIncludeDirs[] = {
+    "/usr/include/powerpc-linux-gnu"
+  };
+  const StringRef PPC64MultiarchIncludeDirs[] = {
+    "/usr/include/powerpc64-linux-gnu"
+  };
   ArrayRef<StringRef> MultiarchIncludeDirs;
   if (getTriple().getArch() == llvm::Triple::x86_64) {
     MultiarchIncludeDirs = X86_64MultiarchIncludeDirs;
@@ -2182,6 +2201,10 @@ void Linux::AddClangSystemIncludeArgs(const ArgList &DriverArgs,
     MultiarchIncludeDirs = MIPSMultiarchIncludeDirs;
   } else if (getTriple().getArch() == llvm::Triple::mipsel) {
     MultiarchIncludeDirs = MIPSELMultiarchIncludeDirs;
+  } else if (getTriple().getArch() == llvm::Triple::ppc) {
+    MultiarchIncludeDirs = PPCMultiarchIncludeDirs;
+  } else if (getTriple().getArch() == llvm::Triple::ppc64) {
+    MultiarchIncludeDirs = PPC64MultiarchIncludeDirs;
   }
   for (ArrayRef<StringRef>::iterator I = MultiarchIncludeDirs.begin(),
                                      E = MultiarchIncludeDirs.end();

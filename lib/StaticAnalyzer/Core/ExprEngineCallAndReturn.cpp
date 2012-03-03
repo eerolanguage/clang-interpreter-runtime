@@ -14,7 +14,7 @@
 #include "clang/StaticAnalyzer/Core/CheckerManager.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ExprEngine.h"
 #include "clang/StaticAnalyzer/Core/PathSensitive/ObjCMessage.h"
-#include "clang/Analysis/Support/SaveAndRestore.h"
+#include "llvm/Support/SaveAndRestore.h"
 #include "clang/AST/DeclCXX.h"
 
 using namespace clang;
@@ -142,13 +142,16 @@ bool ExprEngine::InlineCall(ExplodedNodeSet &Dst,
       // FIXME: Handle C++.
       break;
     case Stmt::CallExprClass: {
-      // Cap the stack depth at 4 calls (5 stack frames, base + 4 calls).
-      // These heuristics are a WIP.
-      if (getNumberStackFrames(Pred->getLocationContext()) == 5)
+      if (getNumberStackFrames(Pred->getLocationContext())
+            == AMgr.InlineMaxStackDepth)
         return false;
-      
-      // Construct a new stack frame for the callee.
+
       AnalysisDeclContext *CalleeADC = AMgr.getAnalysisDeclContext(FD);
+      const CFG *CalleeCFG = CalleeADC->getCFG();
+      if (CalleeCFG->getNumBlockIDs() > AMgr.InlineMaxFunctionSize)
+        return false;
+
+      // Construct a new stack frame for the callee.
       const StackFrameContext *CallerSFC =
       Pred->getLocationContext()->getCurrentStackFrame();
       const StackFrameContext *CalleeSFC =
@@ -193,11 +196,19 @@ static void findPtrToConstParams(llvm::SmallSet<unsigned, 1> &PreserveArgs,
     // argument is const.
     if (II) {
       StringRef FName = II->getName();
-      // 'int pthread_setspecific(ptheread_key k, const void *)' stores a value
-      // into thread local storage. The value can later be retrieved with
+      //  - 'int pthread_setspecific(ptheread_key k, const void *)' stores a
+      // value into thread local storage. The value can later be retrieved with
       // 'void *ptheread_getspecific(pthread_key)'. So even thought the
       // parameter is 'const void *', the region escapes through the call.
-      if (FName.equals("pthread_setspecific"))
+      //  - funopen - sets a buffer for future IO calls.
+      //  - ObjC functions that end with "NoCopy" can free memory, of the passed
+      // in buffer.
+      // - Many CF containers allow objects to escape through custom
+      // allocators/deallocators upon container construction.
+      if (FName == "pthread_setspecific" ||
+          FName == "funopen" ||
+          FName.endswith("NoCopy") ||
+          Call.isCFCGAllowingEscape(FName))
         return;
     }
 

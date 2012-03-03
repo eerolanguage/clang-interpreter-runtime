@@ -249,9 +249,9 @@ CodeGenFunction::GetAddressOfDerivedClass(llvm::Value *Value,
   }
   
   // Apply the offset.
-  Value = Builder.CreatePtrToInt(Value, NonVirtualOffset->getType());
-  Value = Builder.CreateSub(Value, NonVirtualOffset);
-  Value = Builder.CreateIntToPtr(Value, DerivedPtrTy);
+  Value = Builder.CreateBitCast(Value, Int8PtrTy);
+  Value = Builder.CreateGEP(Value, Builder.CreateNeg(NonVirtualOffset),
+                            "sub.ptr");
 
   // Just cast.
   Value = Builder.CreateBitCast(Value, DerivedPtrTy);
@@ -1062,6 +1062,10 @@ void CodeGenFunction::EnterDtorCleanups(const CXXDestructorDecl *DD,
     QualType::DestructionKind dtorKind = type.isDestructedType();
     if (!dtorKind) continue;
 
+    // Anonymous union members do not have their destructors called.
+    const RecordType *RT = type->getAsUnionType();
+    if (RT && RT->getDecl()->isAnonymousStructOrUnion()) continue;
+
     CleanupKind cleanupKind = getCleanupKind(dtorKind);
     EHStack.pushCleanup<DestroyField>(cleanupKind, field,
                                       getDestroyer(dtorKind),
@@ -1791,9 +1795,7 @@ void CodeGenFunction::EmitLambdaToBlockPointerBody(FunctionArgList &Args) {
     return;
   }
 
-  InLambdaConversionToBlock = true;
   EmitFunctionBody(Args);
-  InLambdaConversionToBlock = false;
 }
 
 void CodeGenFunction::EmitLambdaDelegatingInvokeBody(const CXXMethodDecl *MD) {

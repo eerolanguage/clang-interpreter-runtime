@@ -258,7 +258,8 @@ ExprResult Parser::ParseConstantExpression(TypeCastState isTypeCast) {
                                                Sema::ConstantEvaluated);
 
   ExprResult LHS(ParseCastExpression(false, false, isTypeCast));
-  return ParseRHSOfBinaryExpression(LHS, prec::Conditional);
+  ExprResult Res(ParseRHSOfBinaryExpression(LHS, prec::Conditional));
+  return Actions.ActOnConstantExpression(Res);
 }
 
 /// ParseRHSOfBinaryExpression - Parse a binary expression that starts with
@@ -351,9 +352,16 @@ Parser::ParseRHSOfBinaryExpression(ExprResult LHS, prec::Level MinPrec) {
     // be a throw-expression, which is not a valid cast-expression.
     // Therefore we need some special-casing here.
     // Also note that the third operand of the conditional operator is
-    // an assignment-expression in C++.
+    // an assignment-expression in C++, and in C++11, we can have a
+    // braced-init-list on the RHS of an assignment. For better diagnostics,
+    // parse as if we were allowed braced-init-lists everywhere, and check that
+    // they only appear on the RHS of assignments later.
     ExprResult RHS;
-    if (getLang().CPlusPlus && NextTokPrec <= prec::Conditional)
+    bool RHSIsInitList = false;
+    if (getLang().CPlusPlus0x && Tok.is(tok::l_brace)) {
+      RHS = ParseBraceInitializer();
+      RHSIsInitList = true;
+    } else if (getLang().CPlusPlus && NextTokPrec <= prec::Conditional)
       RHS = ParseAssignmentExpression();
     else
       RHS = ParseCastExpression(false);
@@ -375,6 +383,11 @@ Parser::ParseRHSOfBinaryExpression(ExprResult LHS, prec::Level MinPrec) {
     // more tightly with RHS than we do, evaluate it completely first.
     if (ThisPrec < NextTokPrec ||
         (ThisPrec == NextTokPrec && isRightAssoc)) {
+      if (!RHS.isInvalid() && RHSIsInitList) {
+        Diag(Tok, diag::err_init_list_bin_op)
+          << /*LHS*/0 << PP.getSpelling(Tok) << Actions.getExprRange(RHS.get());
+        RHS = ExprError();
+      }
       // If this is left-associative, only parse things on the RHS that bind
       // more tightly than the current operator.  If it is left-associative, it
       // is okay, to bind exactly as tightly.  For example, compile A=B=C=D as
@@ -382,6 +395,7 @@ Parser::ParseRHSOfBinaryExpression(ExprResult LHS, prec::Level MinPrec) {
       // The function takes ownership of the RHS.
       RHS = ParseRHSOfBinaryExpression(RHS, 
                             static_cast<prec::Level>(ThisPrec + !isRightAssoc));
+      RHSIsInitList = false;
 
       if (RHS.isInvalid())
         LHS = ExprError();
@@ -390,6 +404,18 @@ Parser::ParseRHSOfBinaryExpression(ExprResult LHS, prec::Level MinPrec) {
                                        getLang().CPlusPlus0x);
     }
     assert(NextTokPrec <= ThisPrec && "Recursion didn't work!");
+
+    if (!RHS.isInvalid() && RHSIsInitList) {
+      if (ThisPrec == prec::Assignment) {
+        Diag(OpToken, diag::warn_cxx98_compat_generalized_initializer_lists)
+          << Actions.getExprRange(RHS.get());
+      } else {
+        Diag(OpToken, diag::err_init_list_bin_op)
+          << /*RHS*/1 << PP.getSpelling(OpToken)
+          << Actions.getExprRange(RHS.get());
+        LHS = ExprError();
+      }
+    }
 
     if (!LHS.isInvalid()) {
       // Combine the LHS and RHS into the LHS (e.g. build AST).

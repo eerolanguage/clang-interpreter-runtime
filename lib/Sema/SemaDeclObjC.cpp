@@ -242,7 +242,8 @@ static void DiagnoseObjCImplementedDeprecations(Sema &S,
   if (ND && ND->isDeprecated()) {
     S.Diag(ImplLoc, diag::warn_deprecated_def) << select;
     if (select == 0)
-      S.Diag(ND->getLocation(), diag::note_method_declared_at);
+      S.Diag(ND->getLocation(), diag::note_method_declared_at)
+        << ND->getDeclName();
     else
       S.Diag(ND->getLocation(), diag::note_previous_decl) << "class";
   }
@@ -819,7 +820,7 @@ Decl *Sema::ActOnStartCategoryImplementation(
                       IdentifierInfo *CatName, SourceLocation CatLoc) {
   ObjCInterfaceDecl *IDecl = getObjCInterfaceDecl(ClassName, ClassLoc, true);
   ObjCCategoryDecl *CatIDecl = 0;
-  if (IDecl) {
+  if (IDecl && IDecl->hasDefinition()) {
     CatIDecl = IDecl->FindCategoryDeclaration(CatName);
     if (!CatIDecl) {
       // Category @implementation with no corresponding @interface.
@@ -1466,7 +1467,8 @@ void Sema::WarnExactTypedMethods(ObjCMethodDecl *ImpMethodDecl,
   if (match) {
     Diag(ImpMethodDecl->getLocation(), 
          diag::warn_category_method_impl_match);
-    Diag(MethodDecl->getLocation(), diag::note_method_declared_at);
+    Diag(MethodDecl->getLocation(), diag::note_method_declared_at)
+      << MethodDecl->getDeclName();
   }
 }
 
@@ -1539,7 +1541,8 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
             if (Diags.getDiagnosticLevel(DIAG, ImpLoc)
                 != DiagnosticsEngine::Ignored) {
               WarnUndefinedMethod(ImpLoc, method, IncompleteImpl, DIAG);
-              Diag(method->getLocation(), diag::note_method_declared_at);
+              Diag(method->getLocation(), diag::note_method_declared_at)
+                << method->getDeclName();
               Diag(CDecl->getLocation(), diag::note_required_for_protocol_at)
                 << PDecl->getDeclName();
             }
@@ -1561,7 +1564,8 @@ void Sema::CheckProtocolMethodDefs(SourceLocation ImpLoc,
       if (Diags.getDiagnosticLevel(DIAG, ImpLoc) !=
             DiagnosticsEngine::Ignored) {
         WarnUndefinedMethod(ImpLoc, method, IncompleteImpl, DIAG);
-        Diag(method->getLocation(), diag::note_method_declared_at);
+        Diag(method->getLocation(), diag::note_method_declared_at)
+          << method->getDeclName();
         Diag(IDecl->getLocation(), diag::note_required_for_protocol_at) <<
           PDecl->getDeclName();
       }
@@ -2500,10 +2504,11 @@ namespace {
 /// A helper class for searching for methods which a particular method
 /// overrides.
 class OverrideSearch {
+public:
   Sema &S;
   ObjCMethodDecl *Method;
-  llvm::SmallPtrSet<ObjCContainerDecl*, 8> Searched;
-  llvm::SmallPtrSet<ObjCMethodDecl*, 8> Overridden;
+  llvm::SmallPtrSet<ObjCContainerDecl*, 128> Searched;
+  llvm::SmallPtrSet<ObjCMethodDecl*, 4> Overridden;
   bool Recursive;
 
 public:
@@ -2535,7 +2540,7 @@ public:
     searchFromContainer(container);
   }
 
-  typedef llvm::SmallPtrSet<ObjCMethodDecl*,8>::iterator iterator;
+  typedef llvm::SmallPtrSet<ObjCMethodDecl*, 128>::iterator iterator;
   iterator begin() const { return Overridden.begin(); }
   iterator end() const { return Overridden.end(); }
 
@@ -2798,7 +2803,8 @@ Decl *Sema::ActOnMethodDeclaration(
       SourceLocation MethodLoc = IMD->getLocation();
       if (!getSourceManager().isInSystemHeader(MethodLoc)) {
         Diag(EndLoc, diag::warn_attribute_method_def);
-        Diag(MethodLoc, diag::note_method_declared_at);
+        Diag(MethodLoc, diag::note_method_declared_at)
+          << ObjCMethod->getDeclName();
       }
     }
   } else {

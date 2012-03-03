@@ -35,6 +35,7 @@
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/ADT/OwningPtr.h"
+#include "llvm/ADT/Statistic.h"
 
 using namespace clang;
 using namespace ento;
@@ -156,7 +157,11 @@ public:
                                   Opts.TrimGraph, Opts.InlineCall,
                                   Opts.UnoptimizedCFG, Opts.CFGAddImplicitDtors,
                                   Opts.CFGAddInitializers,
-                                  Opts.EagerlyTrimEGraph));
+                                  Opts.EagerlyTrimEGraph,
+                                  Opts.InlineMaxStackDepth,
+                                  Opts.InlineMaxFunctionSize));
+    if (Opts.PrintStats)
+      llvm::EnableStatistics();
   }
 
   virtual void HandleTranslationUnit(ASTContext &C);

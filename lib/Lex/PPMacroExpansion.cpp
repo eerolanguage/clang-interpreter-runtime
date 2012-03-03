@@ -667,7 +667,7 @@ static bool HasFeature(const Preprocessor &PP, const IdentifierInfo *II) {
            .Case("cxx_static_assert", LangOpts.CPlusPlus0x)
            .Case("cxx_trailing_return", LangOpts.CPlusPlus0x)
            .Case("cxx_unicode_literals", LangOpts.CPlusPlus0x)
-         //.Case("cxx_unrestricted_unions", false)
+           .Case("cxx_unrestricted_unions", LangOpts.CPlusPlus0x)
          //.Case("cxx_user_literals", false)
            .Case("cxx_variadic_templates", LangOpts.CPlusPlus0x)
            // Type traits
@@ -760,7 +760,12 @@ static bool HasExtension(const Preprocessor &PP, const IdentifierInfo *II) {
 /// HasAttribute -  Return true if we recognize and implement the attribute
 /// specified by the given identifier.
 static bool HasAttribute(const IdentifierInfo *II) {
-    return llvm::StringSwitch<bool>(II->getName())
+  StringRef Name = II->getName();
+  // Normalize the attribute name, __foo__ becomes foo.
+  if (Name.startswith("__") && Name.endswith("__") && Name.size() >= 4)
+    Name = Name.substr(2, Name.size() - 4);
+
+  return llvm::StringSwitch<bool>(Name)
 #include "clang/Lex/AttrSpellings.inc"
         .Default(false);
 }

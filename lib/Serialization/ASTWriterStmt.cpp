@@ -598,6 +598,7 @@ void ASTStmtWriter::VisitInitListExpr(InitListExpr *E) {
   else
     Writer.AddDeclRef(E->getInitializedFieldInUnion(), Record);
   Record.push_back(E->hadArrayRangeDesignator());
+  Record.push_back(E->initializesStdInitializerList());
   Record.push_back(E->getNumInits());
   if (isArrayFiller) {
     // ArrayFiller may have filled "holes" due to designated initializer.
@@ -1585,11 +1586,10 @@ void ASTWriter::WriteSubStmt(Stmt *S,
 void ASTWriter::FlushStmts() {
   RecordData Record;
 
-  /// \brief Set of parent Stmts for the currently serializing sub stmt.
-  llvm::DenseSet<Stmt *> ParentStmts;
-  /// \brief Offsets of sub stmts already serialized. The offset points
-  /// just after the stmt record.
-  llvm::DenseMap<Stmt *, uint64_t> SubStmtEntries;
+  // We expect to be the only consumer of the two temporary statement maps,
+  // assert that they are empty.
+  assert(SubStmtEntries.empty() && "unexpected entries in sub stmt map");
+  assert(ParentStmts.empty() && "unexpected entries in parent stmt map");
 
   for (unsigned I = 0, N = StmtsToEmit.size(); I != N; ++I) {
     WriteSubStmt(StmtsToEmit[I], SubStmtEntries, ParentStmts);
