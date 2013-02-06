@@ -7038,3 +7038,10 @@ CodeGen::CreateMacObjCRuntime(CodeGen::CodeGenModule &CGM) {
   }
   llvm_unreachable("bad runtime");
 }
+
+// This bit of ugliness is done to share all the type helpers without
+// causing merge issues
+//
+#define INCLUDE_JIT_OBJC_RUNTIME
+#include "CGObjCJit.cpp"
+

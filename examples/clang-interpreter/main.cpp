@@ -20,6 +20,7 @@
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ExecutionEngine/ExecutionEngine.h"
 #include "llvm/ExecutionEngine/JIT.h"
+#include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/Host.h"
 #include "llvm/Support/ManagedStatic.h"
@@ -52,16 +53,29 @@ static int Execute(llvm::Module *Mod, char * const *envp) {
     return 255;
   }
 
+  // TODO: look into getting rid of this by tying the function block to main()
+  llvm::Function *InitFn = Mod->getFunction(".objc_jit_init");
+  if (!InitFn) {
+    llvm::errs() << "'.objc_jit_init' function not found in module.\n";
+    return 255;
+  }
+
   llvm::Function *EntryFn = Mod->getFunction("main");
   if (!EntryFn) {
     llvm::errs() << "'main' function not found in module.\n";
     return 255;
   }
 
+  // TODO: look into getting rid of this by tying the function block to main()
+  printf("Running .objc_jit_init()...\n");
+  std::vector<llvm::GenericValue> noargs;
+  EE->runFunction(InitFn, noargs);
+
   // FIXME: Support passing arguments.
   std::vector<std::string> Args;
   Args.push_back(Mod->getModuleIdentifier());
 
+  printf("Running main()...\n");
   return EE->runFunctionAsMain(EntryFn, Args, envp);
 }
 

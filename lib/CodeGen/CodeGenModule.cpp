@@ -146,6 +146,9 @@ CodeGenModule::~CodeGenModule() {
 void CodeGenModule::createObjCRuntime() {
   // This is just isGNUFamily(), but we want to force implementors of
   // new ABIs to decide how best to do this.
+  ObjCRuntime = CreateJitObjCRuntime(*this);
+  return;
+
   switch (LangOpts.ObjCRuntime.getKind()) {
   case ObjCRuntime::GNUstep:
   case ObjCRuntime::GCC:
