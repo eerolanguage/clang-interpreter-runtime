@@ -324,8 +324,8 @@ CGObjCJit::CGObjCJit(CodeGen::CodeGenModule &cgm)
 
   puts("Constructing CGObjCJit (host runtime proxy)");
 
-  llvm::IntegerType *Int8Ty = llvm::Type::getInt8Ty(VMContext);
-  llvm::PointerType *PtrToInt8Ty = llvm::PointerType::getUnqual(Int8Ty);
+  llvm::PointerType *PtrToInt8Ty =
+      llvm::Type::getInt8Ty(VMContext)->getPointerTo();
 
   NULLPtr = llvm::ConstantPointerNull::get(PtrToInt8Ty);
 
@@ -380,7 +380,7 @@ CGObjCJit::CGObjCJit(CodeGen::CodeGenModule &cgm)
 
     fn_object_getClass.init(&CGM, "object_getClass",
                             ObjCTypes.ClassPtrTy,
-                            ObjCTypes.Int8PtrTy,
+                            ObjCTypes.ObjectPtrTy,
                             NULL);
 
     // Define VM class_addMethod and class_replaceMethod function calls for
@@ -592,15 +592,17 @@ CGObjCJit::GenerateMessageSend(CodeGen::CodeGenFunction &CGF,
                                const CallArgList &CallArgs,
                                const ObjCInterfaceDecl *Class,
                                const ObjCMethodDecl *Method) {
+  llvm::Value *ReceiverObj =
+      CGF.Builder.CreateBitCast(Receiver, ObjCTypes.ObjectPtrTy);
   llvm::Value *ReceiverClass;
   if (Class) {
     ReceiverClass = GetMetaClass(CGF.Builder, Class);
   } else {
-    ReceiverClass = CGF.Builder.CreateCall(fn_object_getClass, Receiver);
+    ReceiverClass = CGF.Builder.CreateCall(fn_object_getClass, ReceiverObj);
   }
 
   return EmitMessageSend(CGF, Return, ResultType, Sel,
-                         Receiver, ReceiverClass,
+                         ReceiverObj, ReceiverClass,
                          CallArgs, Method);
 }
 
@@ -1034,19 +1036,19 @@ CGObjCJit::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
                                      Arg1);
   }
 
-  const bool isVariadic = Method ? Method->isVariadic() : false;
+  llvm::Type *ReturnTy = CGM.getTypes().ConvertType(ResultType);
+
   llvm::Type *ImpParams[] = { ObjCTypes.ObjectPtrTy,
                               ObjCTypes.SelectorPtrTy };
-  llvm::Type *ReturnTy = CGM.getTypes().ConvertType(ResultType);
-  llvm::Type *ImpTy =
-      llvm::PointerType::getUnqual(llvm::FunctionType::get(ReturnTy,
-                                                           ImpParams,
-                                                           isVariadic));
+
+  llvm::Type *ImpTy = llvm::FunctionType::get(ReturnTy,
+                                              ImpParams,
+                                              true)->getPointerTo();
+  
   llvm::Value *theImp = CGF.Builder.CreateBitCast(getImp, ImpTy);
 
   MessageSendInfo MSI = getMessageSendInfo(Method, ResultType, ActualArgs);
   return CGF.EmitCall(MSI.CallInfo, theImp, Return, ActualArgs);
-//  return CGF.EmitCall(FnInfo, theImp, Return, ActualArgs);
 }
 
 
