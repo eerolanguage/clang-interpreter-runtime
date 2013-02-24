@@ -511,6 +511,27 @@ void ASTDumper::dumpAttr(const Attr *A) {
 #include "clang/AST/AttrDump.inc"
 }
 
+static Decl *getPreviousDeclImpl(...) {
+  return 0;
+}
+
+template<typename T>
+static const Decl *getPreviousDeclImpl(const Redeclarable<T> *D) {
+  return D->getPreviousDecl();
+}
+
+/// Get the previous declaration in the redeclaration chain for a declaration.
+static const Decl *getPreviousDecl(const Decl *D) {
+  switch (D->getKind()) {
+#define DECL(DERIVED, BASE) \
+  case Decl::DERIVED: \
+    return getPreviousDeclImpl(cast<DERIVED##Decl>(D));
+#define ABSTRACT_DECL(DECL)
+#include "clang/AST/DeclNodes.inc"
+  }
+  llvm_unreachable("Decl that isn't part of DeclNodes.inc!");
+}
+
 //===----------------------------------------------------------------------===//
 //  C++ Utilities
 //===----------------------------------------------------------------------===//
@@ -639,6 +660,10 @@ void ASTDumper::dumpDecl(const Decl *D) {
     OS << D->getDeclKindName() << "Decl";
   }
   dumpPointer(D);
+  if (D->getLexicalDeclContext() != D->getDeclContext())
+    OS << " parent " << cast<Decl>(D->getDeclContext());
+  if (const Decl *Prev = getPreviousDecl(D))
+    OS << " prev " << Prev;
   dumpSourceRange(D->getSourceRange());
 
   bool HasAttrs = D->attr_begin() != D->attr_end();
@@ -664,7 +689,7 @@ void ASTDumper::dumpDecl(const Decl *D) {
 
   setMoreChildren(false);
   if (HasDeclContext)
-    dumpDeclContext(dyn_cast<DeclContext>(D));
+    dumpDeclContext(cast<DeclContext>(D));
 }
 
 void ASTDumper::VisitLabelDecl(const LabelDecl *D) {
@@ -910,9 +935,9 @@ void ASTDumper::VisitFunctionTemplateDecl(const FunctionTemplateDecl *D) {
   dumpName(D);
   dumpTemplateParameters(D->getTemplateParameters());
   dumpDecl(D->getTemplatedDecl());
-  for (FunctionTemplateDecl::spec_iterator
-       I = const_cast<FunctionTemplateDecl*>(D)->spec_begin(),
-       E = const_cast<FunctionTemplateDecl*>(D)->spec_end(); I != E; ++I) {
+  for (FunctionTemplateDecl::spec_iterator I = D->spec_begin(),
+                                           E = D->spec_end();
+       I != E; ++I) {
     FunctionTemplateDecl::spec_iterator Next = I;
     ++Next;
     if (Next == E)
@@ -922,7 +947,10 @@ void ASTDumper::VisitFunctionTemplateDecl(const FunctionTemplateDecl *D) {
     case TSK_ImplicitInstantiation:
     case TSK_ExplicitInstantiationDeclaration:
     case TSK_ExplicitInstantiationDefinition:
-      dumpDecl(*I);
+      if (D == D->getCanonicalDecl())
+        dumpDecl(*I);
+      else
+        dumpDeclRef(*I);
       break;
     case TSK_ExplicitSpecialization:
       dumpDeclRef(*I);
@@ -935,10 +963,8 @@ void ASTDumper::VisitClassTemplateDecl(const ClassTemplateDecl *D) {
   dumpName(D);
   dumpTemplateParameters(D->getTemplateParameters());
 
-  ClassTemplateDecl::spec_iterator I =
-      const_cast<ClassTemplateDecl*>(D)->spec_begin();
-  ClassTemplateDecl::spec_iterator E =
-      const_cast<ClassTemplateDecl*>(D)->spec_end();
+  ClassTemplateDecl::spec_iterator I = D->spec_begin();
+  ClassTemplateDecl::spec_iterator E = D->spec_end();
   if (I == E)
     lastChild();
   dumpDecl(D->getTemplatedDecl());
@@ -950,7 +976,10 @@ void ASTDumper::VisitClassTemplateDecl(const ClassTemplateDecl *D) {
     switch (I->getTemplateSpecializationKind()) {
     case TSK_Undeclared:
     case TSK_ImplicitInstantiation:
-      dumpDecl(*I);
+      if (D == D->getCanonicalDecl())
+        dumpDecl(*I);
+      else
+        dumpDeclRef(*I);
       break;
     case TSK_ExplicitSpecialization:
     case TSK_ExplicitInstantiationDeclaration:
@@ -1049,6 +1078,7 @@ void ASTDumper::VisitAccessSpecDecl(const AccessSpecDecl *D) {
 }
 
 void ASTDumper::VisitFriendDecl(const FriendDecl *D) {
+  lastChild();
   if (TypeSourceInfo *T = D->getFriendType())
     dumpType(T->getType());
   else

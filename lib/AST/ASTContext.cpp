@@ -654,7 +654,7 @@ ASTContext::ASTContext(LangOptions& LOpts, SourceManager &SM,
     DeclarationNames(*this),
     ExternalSource(0), Listener(0),
     Comments(SM), CommentsLoaded(false),
-    CommentCommandTraits(BumpAlloc),
+    CommentCommandTraits(BumpAlloc, LOpts.CommentOpts),
     LastSDM(0, 0),
     UniqueBlockByRefTypeID(0)
 {
@@ -906,6 +906,7 @@ void ASTContext::InitBuiltinTypes(const TargetInfo &Target) {
     InitBuiltinType(OCLImage2dArrayTy, BuiltinType::OCLImage2dArray);
     InitBuiltinType(OCLImage3dTy, BuiltinType::OCLImage3d);
 
+    InitBuiltinType(OCLSamplerTy, BuiltinType::OCLSampler);
     InitBuiltinType(OCLEventTy, BuiltinType::OCLEvent);
   }
   
@@ -1447,6 +1448,11 @@ ASTContext::getTypeInfoImpl(const Type *T) const {
     case BuiltinType::ObjCSel:
       Width = Target->getPointerWidth(0); 
       Align = Target->getPointerAlign(0);
+      break;
+    case BuiltinType::OCLSampler:
+      // Samplers are modeled as integers.
+      Width = Target->getIntWidth();
+      Align = Target->getIntAlign();
       break;
     case BuiltinType::OCLEvent:
     case BuiltinType::OCLImage1d:
@@ -2951,8 +2957,8 @@ ASTContext::getTemplateSpecializationTypeInfo(TemplateName Name,
   QualType TST = getTemplateSpecializationType(Name, Args, Underlying);
 
   TypeSourceInfo *DI = CreateTypeSourceInfo(TST);
-  TemplateSpecializationTypeLoc TL
-    = cast<TemplateSpecializationTypeLoc>(DI->getTypeLoc());
+  TemplateSpecializationTypeLoc TL =
+      DI->getTypeLoc().castAs<TemplateSpecializationTypeLoc>();
   TL.setTemplateKeywordLoc(SourceLocation());
   TL.setTemplateNameLoc(NameLoc);
   TL.setLAngleLoc(Args.getLAngleLoc());
@@ -3228,7 +3234,7 @@ ASTContext::getDependentTemplateSpecializationType(
 }
 
 QualType ASTContext::getPackExpansionType(QualType Pattern,
-                                      llvm::Optional<unsigned> NumExpansions) {
+                                          Optional<unsigned> NumExpansions) {
   llvm::FoldingSetNodeID ID;
   PackExpansionType::Profile(ID, Pattern, NumExpansions);
 
@@ -4923,6 +4929,7 @@ static char getObjCEncodingForPrimitiveKind(const ASTContext *C,
     case BuiltinType::OCLImage2dArray:
     case BuiltinType::OCLImage3d:
     case BuiltinType::OCLEvent:
+    case BuiltinType::OCLSampler:
     case BuiltinType::Dependent:
 #define BUILTIN_TYPE(KIND, ID)
 #define PLACEHOLDER_TYPE(KIND, ID) \
@@ -4987,7 +4994,8 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
                                             bool EncodingProperty,
                                             bool StructField,
                                             bool EncodeBlockParameters,
-                                            bool EncodeClassNames) const {
+                                            bool EncodeClassNames,
+                                            bool EncodePointerToObjCTypedef) const {
   CanQualType CT = getCanonicalType(T);
   switch (CT->getTypeClass()) {
   case Type::Builtin:
@@ -5134,13 +5142,11 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
       if (ClassTemplateSpecializationDecl *Spec
           = dyn_cast<ClassTemplateSpecializationDecl>(RDecl)) {
         const TemplateArgumentList &TemplateArgs = Spec->getTemplateArgs();
-        std::string TemplateArgsStr
-          = TemplateSpecializationType::PrintTemplateArgumentList(
+        llvm::raw_string_ostream OS(S);
+        TemplateSpecializationType::PrintTemplateArgumentList(OS,
                                             TemplateArgs.data(),
                                             TemplateArgs.size(),
                                             (*this).getPrintingPolicy());
-
-        S += TemplateArgsStr;
       }
     } else {
       S += '?';
@@ -5237,7 +5243,9 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
       if (Field->isBitField())
         getObjCEncodingForTypeImpl(Field->getType(), S, false, true, Field);
       else
-        getObjCEncodingForTypeImpl(Field->getType(), S, false, true, FD);
+        getObjCEncodingForTypeImpl(Field->getType(), S, false, true, FD,
+                                   false, false, false, false, false,
+                                   EncodePointerToObjCTypedef);
     }
     S += '}';
     return;
@@ -5279,14 +5287,17 @@ void ASTContext::getObjCEncodingForTypeImpl(QualType T, std::string& S,
 
     QualType PointeeTy = OPT->getPointeeType();
     if (!EncodingProperty &&
-        isa<TypedefType>(PointeeTy.getTypePtr())) {
+        isa<TypedefType>(PointeeTy.getTypePtr()) &&
+        !EncodePointerToObjCTypedef) {
       // Another historical/compatibility reason.
       // We encode the underlying type which comes out as
       // {...};
       S += '^';
       getObjCEncodingForTypeImpl(PointeeTy, S,
                                  false, ExpandPointedToStructures,
-                                 NULL);
+                                 NULL,
+                                 false, false, false, false, false,
+                                 /*EncodePointerToObjCTypedef*/true);
       return;
     }
 

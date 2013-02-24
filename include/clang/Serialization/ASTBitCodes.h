@@ -720,7 +720,10 @@ namespace clang {
       PREDEF_TYPE_IMAGE2D_ARR_ID = 42,
       /// \brief OpenCL 3d image type.
       PREDEF_TYPE_IMAGE3D_ID    = 43,
-      PREDEF_TYPE_EVENT_ID      = 44
+      /// \brief OpenCL event type.
+      PREDEF_TYPE_EVENT_ID      = 44,
+      /// \brief OpenCL sampler type.
+      PREDEF_TYPE_SAMPLER_ID    = 45
     };
 
     /// \brief The number of predefined type IDs that are reserved for
@@ -1028,7 +1031,9 @@ namespace clang {
       /// function specialization. (Microsoft extension).
       DECL_CLASS_SCOPE_FUNCTION_SPECIALIZATION,
       /// \brief An ImportDecl recording a module import.
-      DECL_IMPORT
+      DECL_IMPORT,
+      /// \brief An EmptyDecl record.
+      DECL_EMPTY
     };
 
     /// \brief Record codes for each kind of statement or expression.

@@ -251,6 +251,45 @@ namespace testClassTemplateDecl {
 // CHECK-NEXT:   CXXRecordDecl{{.*}} class TestClassTemplatePartial
 // CHECK-NEXT:   FieldDecl{{.*}} j
 
+// PR15220 dump instantiation only once
+namespace testCanonicalTemplate {
+  class A {};
+
+  template<typename T> void TestFunctionTemplate(T);
+  template<typename T> void TestFunctionTemplate(T);
+  void bar(A a) { TestFunctionTemplate(a); }
+  // CHECK:      FunctionTemplateDecl{{.*}} TestFunctionTemplate
+  // CHECK-NEXT:   TemplateTypeParmDecl
+  // CHECK-NEXT:   FunctionDecl{{.*}} TestFunctionTemplate 'void (T)'
+  // CHECK-NEXT:     ParmVarDecl{{.*}} 'T'
+  // CHECK-NEXT:   FunctionDecl{{.*}} TestFunctionTemplate {{.*}}A
+  // CHECK-NEXT:     TemplateArgument
+  // CHECK-NEXT:     ParmVarDecl
+  // CHECK:      FunctionTemplateDecl{{.*}} TestFunctionTemplate
+  // CHECK-NEXT:   TemplateTypeParmDecl
+  // CHECK-NEXT:   FunctionDecl{{.*}} TestFunctionTemplate 'void (T)'
+  // CHECK-NEXT:     ParmVarDecl{{.*}} 'T'
+  // CHECK-NEXT:   Function{{.*}} 'TestFunctionTemplate'
+  // CHECK-NEXT-NOT: TemplateArgument
+
+  template<typename T1> class TestClassTemplate {
+    template<typename T2> friend class TestClassTemplate;
+  };
+  TestClassTemplate<A> a;
+  // CHECK:      ClassTemplateDecl{{.*}} TestClassTemplate
+  // CHECK-NEXT:   TemplateTypeParmDecl
+  // CHECK-NEXT:   CXXRecordDecl{{.*}} class TestClassTemplate
+  // CHECK-NEXT:     CXXRecordDecl{{.*}} class TestClassTemplate
+  // CHECK-NEXT:     FriendDecl
+  // CHECK-NEXT:       ClassTemplateDecl{{.*}} TestClassTemplate
+  // CHECK-NEXT:         TemplateTypeParmDecl
+  // CHECK-NEXT:         CXXRecordDecl{{.*}} class TestClassTemplate
+  // CHECK-NEXT:         ClassTemplateSpecialization{{.*}} 'TestClassTemplate'
+  // CHECK-NEXT:   ClassTemplateSpecializationDecl{{.*}} class TestClassTemplate
+  // CHECK-NEXT:     TemplateArgument{{.*}}A
+  // CHECK-NEXT:     CXXRecordDecl{{.*}} class TestClassTemplate
+}
+
 template <class T>
 class TestClassScopeFunctionSpecialization {
   template<class U> void foo(U a) { }
@@ -403,3 +442,16 @@ namespace TestFileScopeAsmDecl {
 // CHECK:      NamespaceDecl{{.*}} TestFileScopeAsmDecl{{$}}
 // CHECK:        FileScopeAsmDecl{{.*>$}}
 // CHECK-NEXT:     StringLiteral
+
+namespace TestFriendDecl2 {
+  void f();
+  struct S {
+    friend void f();
+  };
+}
+// CHECK: NamespaceDecl [[TestFriendDecl2:0x.*]] <{{.*}}> TestFriendDecl2
+// CHECK: |-FunctionDecl [[TestFriendDecl2_f:0x.*]] <{{.*}}> f 'void (void)'
+// CHECK: `-CXXRecordDecl {{.*}} struct S
+// CHECK:   |-CXXRecordDecl {{.*}} struct S
+// CHECK:   `-FriendDecl
+// CHECK:     `-FunctionDecl {{.*}} parent [[TestFriendDecl2]] prev [[TestFriendDecl2_f]] <{{.*}}> f 'void (void)'

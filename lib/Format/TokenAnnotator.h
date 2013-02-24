@@ -34,13 +34,17 @@ enum TokenType {
   TT_ConditionalExpr,
   TT_CtorInitializerColon,
   TT_ImplicitStringLiteral,
+  TT_InheritanceColon,
   TT_LineComment,
+  TT_ObjCArrayLiteral,
   TT_ObjCBlockLParen,
   TT_ObjCDecl,
-  TT_ObjCMethodSpecifier,
+  TT_ObjCForIn,
   TT_ObjCMethodExpr,
+  TT_ObjCMethodSpecifier,
   TT_ObjCProperty,
-  TT_OverloadedOperator,
+  TT_ObjCSelectorName,
+  TT_OverloadedOperatorLParen,
   TT_PointerOrReference,
   TT_PureVirtualSpecifier,
   TT_RangeBasedForLoopColon,
@@ -66,10 +70,12 @@ enum LineType {
 class AnnotatedToken {
 public:
   explicit AnnotatedToken(const FormatToken &FormatTok)
-      : FormatTok(FormatTok), Type(TT_Unknown), SpaceRequiredBefore(false),
+      : FormatTok(FormatTok), Type(TT_Unknown), SpacesRequiredBefore(0),
         CanBreakBefore(false), MustBreakBefore(false),
         ClosesTemplateDeclaration(false), MatchingParen(NULL),
-        ParameterCount(1), BindingStrength(0), SplitPenalty(0), Parent(NULL) {
+        ParameterCount(0), BindingStrength(0), SplitPenalty(0),
+        LongestObjCSelectorName(0), Parent(NULL), FakeLParens(0),
+        FakeRParens(0) {
   }
 
   bool is(tok::TokenKind Kind) const { return FormatTok.Tok.is(Kind); }
@@ -83,7 +89,7 @@ public:
 
   TokenType Type;
 
-  bool SpaceRequiredBefore;
+  unsigned SpacesRequiredBefore;
   bool CanBreakBefore;
   bool MustBreakBefore;
 
@@ -109,8 +115,17 @@ public:
   /// \brief Penalty for inserting a line break before this token.
   unsigned SplitPenalty;
 
+  /// \brief If this is the first ObjC selector name in an ObjC method
+  /// definition or call, this contains the length of the longest name.
+  unsigned LongestObjCSelectorName;
+
   std::vector<AnnotatedToken> Children;
   AnnotatedToken *Parent;
+
+  /// \brief Insert this many fake ( before this token for correct indentation.
+  unsigned FakeLParens;
+  /// \brief Insert this many fake ) after this token for correct indentation.
+  unsigned FakeRParens;
 
   const AnnotatedToken *getPreviousNoneComment() const {
     AnnotatedToken *Tok = Parent;
@@ -125,7 +140,8 @@ public:
   AnnotatedLine(const UnwrappedLine &Line)
       : First(Line.Tokens.front()), Level(Line.Level),
         InPPDirective(Line.InPPDirective),
-        MustBeDeclaration(Line.MustBeDeclaration) {
+        MustBeDeclaration(Line.MustBeDeclaration),
+        MightBeFunctionDecl(false) {
     assert(!Line.Tokens.empty());
     AnnotatedToken *Current = &First;
     for (std::list<FormatToken>::const_iterator I = ++Line.Tokens.begin(),
@@ -140,7 +156,8 @@ public:
   AnnotatedLine(const AnnotatedLine &Other)
       : First(Other.First), Type(Other.Type), Level(Other.Level),
         InPPDirective(Other.InPPDirective),
-        MustBeDeclaration(Other.MustBeDeclaration) {
+        MustBeDeclaration(Other.MustBeDeclaration),
+        MightBeFunctionDecl(Other.MightBeFunctionDecl) {
     Last = &First;
     while (!Last->Children.empty()) {
       Last->Children[0].Parent = Last;
@@ -155,6 +172,7 @@ public:
   unsigned Level;
   bool InPPDirective;
   bool MustBeDeclaration;
+  bool MightBeFunctionDecl;
 };
 
 inline prec::Level getPrecedence(const AnnotatedToken &Tok) {
@@ -166,28 +184,32 @@ inline prec::Level getPrecedence(const AnnotatedToken &Tok) {
 class TokenAnnotator {
 public:
   TokenAnnotator(const FormatStyle &Style, SourceManager &SourceMgr, Lexer &Lex,
-                 AnnotatedLine &Line)
-      : Style(Style), SourceMgr(SourceMgr), Lex(Lex), Line(Line) {
+                 IdentifierInfo &Ident_in)
+      : Style(Style), SourceMgr(SourceMgr), Lex(Lex), Ident_in(Ident_in) {
   }
 
-  void annotate();
-  void calculateFormattingInformation(AnnotatedToken &Current);
+  void annotate(AnnotatedLine &Line);
+  void calculateFormattingInformation(AnnotatedLine &Line);
 
 private:
   /// \brief Calculate the penalty for splitting before \c Tok.
-  unsigned splitPenalty(const AnnotatedToken &Tok);
+  unsigned splitPenalty(const AnnotatedLine &Line, const AnnotatedToken &Tok);
 
-  bool spaceRequiredBetween(const AnnotatedToken &Left,
+  bool spaceRequiredBetween(const AnnotatedLine &Line,
+                            const AnnotatedToken &Left,
                             const AnnotatedToken &Right);
 
-  bool spaceRequiredBefore(const AnnotatedToken &Tok);
+  bool spaceRequiredBefore(const AnnotatedLine &Line,
+                           const AnnotatedToken &Tok);
 
-  bool canBreakBefore(const AnnotatedToken &Right);
+  bool canBreakBefore(const AnnotatedLine &Line, const AnnotatedToken &Right);
 
-  FormatStyle Style;
+  const FormatStyle &Style;
   SourceManager &SourceMgr;
   Lexer &Lex;
-  AnnotatedLine &Line;
+
+  // Contextual keywords:
+  IdentifierInfo &Ident_in;
 };
 
 } // end namespace format
