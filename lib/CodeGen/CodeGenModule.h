@@ -28,6 +28,7 @@
 #include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/IR/CallingConv.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Support/ValueHandle.h"
 #include "llvm/Transforms/Utils/BlackList.h"
@@ -46,6 +47,7 @@ namespace llvm {
 namespace clang {
   class TargetCodeGenInfo;
   class ASTContext;
+  class AtomicType;
   class FunctionDecl;
   class IdentifierInfo;
   class ObjCMethodDecl;
@@ -145,6 +147,11 @@ namespace CodeGen {
       unsigned char PointerSizeInBytes;
       unsigned char SizeSizeInBytes;     // sizeof(size_t)
     };
+
+    llvm::CallingConv::ID RuntimeCC;
+    llvm::CallingConv::ID getRuntimeCC() const {
+      return RuntimeCC;
+    }
   };
 
 struct RREntrypoints {
@@ -487,6 +494,9 @@ public:
   llvm::MDNode *getTBAAStructInfo(QualType QTy);
 
   bool isTypeConstant(QualType QTy, bool ExcludeCtorDtor);
+
+  bool isPaddedAtomicType(QualType type);
+  bool isPaddedAtomicType(const AtomicType *type);
 
   static void DecorateInstruction(llvm::Instruction *Inst,
                                   llvm::MDNode *TBAAInfo);

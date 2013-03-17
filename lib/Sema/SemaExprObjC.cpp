@@ -1135,10 +1135,16 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
       if (Args[i]->isTypeDependent())
         continue;
 
-      ExprResult Result = DefaultArgumentPromotion(Args[i]);
-      if (Result.isInvalid())
+      ExprResult result;
+      if (getLangOpts().DebuggerSupport) {
+        QualType paramTy; // ignored
+        result = checkUnknownAnyArg(lbrac, Args[i], paramTy);
+      } else {
+        result = DefaultArgumentPromotion(Args[i]);
+      }
+      if (result.isInvalid())
         return true;
-      Args[i] = Result.take();
+      Args[i] = result.take();
     }
 
     unsigned DiagID;
@@ -1199,14 +1205,17 @@ bool Sema::CheckMessageArgumentTypes(QualType ReceiverType,
     // If the parameter is __unknown_anytype, infer its type
     // from the argument.
     if (param->getType() == Context.UnknownAnyTy) {
-      QualType paramType = checkUnknownAnyArg(argExpr);
-      if (paramType.isNull()) {
+      QualType paramType;
+      ExprResult argE = checkUnknownAnyArg(lbrac, argExpr, paramType);
+      if (argE.isInvalid()) {
         IsError = true;
-        continue;
-      }
+      } else {
+        Args[i] = argE.take();
 
-      // Update the parameter type in-place.
-      param->setType(paramType);
+        // Update the parameter type in-place.
+        param->setType(paramType);
+      }
+      continue;
     }
 
     if (RequireCompleteType(argExpr->getSourceRange().getBegin(),
@@ -1552,8 +1561,15 @@ ActOnClassPropertyRefExpr(IdentifierInfo &receiverName,
 
       if (ObjCMethodDecl *CurMethod = tryCaptureObjCSelf(receiverNameLoc)) {
         if (CurMethod->isInstanceMethod()) {
-          QualType T = 
-            Context.getObjCInterfaceType(CurMethod->getClassInterface());
+          ObjCInterfaceDecl *Super =
+            CurMethod->getClassInterface()->getSuperClass();
+          if (!Super) {
+            // The current class does not have a superclass.
+            Diag(receiverNameLoc, diag::error_root_class_cannot_use_super)
+            << CurMethod->getClassInterface()->getIdentifier();
+            return ExprError();
+          }
+          QualType T = Context.getObjCInterfaceType(Super);
           T = Context.getObjCObjectPointerType(T);
         
           return HandleExprPropertyRefExpr(T->getAsObjCInterfacePointerType(),
@@ -2119,7 +2135,45 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
       return ExprError();
     Receiver = Result.take();
     ReceiverType = Receiver->getType();
+
+    // If the receiver is an ObjC pointer, a block pointer, or an
+    // __attribute__((NSObject)) pointer, we don't need to do any
+    // special conversion in order to look up a receiver.
+    if (ReceiverType->isObjCRetainableType()) {
+      // do nothing
+    } else if (!getLangOpts().ObjCAutoRefCount &&
+               !Context.getObjCIdType().isNull() &&
+               (ReceiverType->isPointerType() || 
+                ReceiverType->isIntegerType())) {
+      // Implicitly convert integers and pointers to 'id' but emit a warning.
+      // But not in ARC.
+      Diag(Loc, diag::warn_bad_receiver_type)
+        << ReceiverType 
+        << Receiver->getSourceRange();
+      if (ReceiverType->isPointerType()) {
+        Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(), 
+                                     CK_CPointerToObjCPointerCast).take();
+      } else {
+        // TODO: specialized warning on null receivers?
+        bool IsNull = Receiver->isNullPointerConstant(Context,
+                                              Expr::NPC_ValueDependentIsNull);
+        CastKind Kind = IsNull ? CK_NullToPointer : CK_IntegralToPointer;
+        Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(),
+                                     Kind).take();
+      }
+      ReceiverType = Receiver->getType();
+    } else if (getLangOpts().CPlusPlus) {
+      ExprResult result = PerformContextuallyConvertToObjCPointer(Receiver);
+      if (result.isUsable()) {
+        Receiver = result.take();
+        ReceiverType = Receiver->getType();
+      }
+    }
   }
+
+  // There's a somewhat weird interaction here where we assume that we
+  // won't actually have a method unless we also don't need to do some
+  // of the more detailed type-checking on the receiver.
 
   if (!Method) {
     // Handle messages to id.
@@ -2256,48 +2310,11 @@ ExprResult Sema::BuildInstanceMessage(Expr *Receiver,
         }
         if (Method && DiagnoseUseOfDecl(Method, Loc, forwardClass))
           return ExprError();
-      } else if (!getLangOpts().ObjCAutoRefCount &&
-                 !Context.getObjCIdType().isNull() &&
-                 (ReceiverType->isPointerType() || 
-                  ReceiverType->isIntegerType())) {
-        // Implicitly convert integers and pointers to 'id' but emit a warning.
-        // But not in ARC.
-        Diag(Loc, diag::warn_bad_receiver_type)
-          << ReceiverType 
-          << Receiver->getSourceRange();
-        if (ReceiverType->isPointerType())
-          Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(), 
-                            CK_CPointerToObjCPointerCast).take();
-        else {
-          // TODO: specialized warning on null receivers?
-          bool IsNull = Receiver->isNullPointerConstant(Context,
-                                              Expr::NPC_ValueDependentIsNull);
-          CastKind Kind = IsNull ? CK_NullToPointer : CK_IntegralToPointer;
-          Receiver = ImpCastExprToType(Receiver, Context.getObjCIdType(),
-                                       Kind).take();
-        }
-        ReceiverType = Receiver->getType();
       } else {
-        ExprResult ReceiverRes;
-        if (getLangOpts().CPlusPlus)
-          ReceiverRes = PerformContextuallyConvertToObjCPointer(Receiver);
-        if (ReceiverRes.isUsable()) {
-          Receiver = ReceiverRes.take();
-          return BuildInstanceMessage(Receiver,
-                                      ReceiverType,
-                                      SuperLoc,
-                                      Sel,
-                                      Method,
-                                      LBracLoc,
-                                      SelectorLocs,
-                                      RBracLoc,
-                                      ArgsIn);
-        } else {
-          // Reject other random receiver types (e.g. structs).
-          Diag(Loc, diag::err_bad_receiver_type)
-            << ReceiverType << Receiver->getSourceRange();
-          return ExprError();
-        }
+        // Reject other random receiver types (e.g. structs).
+        Diag(Loc, diag::err_bad_receiver_type)
+          << ReceiverType << Receiver->getSourceRange();
+        return ExprError();
       }
     }
   }

@@ -166,6 +166,39 @@ TEST_F(FormatTest, OnlyGeneratesNecessaryReplacements) {
 
 TEST_F(FormatTest, RemovesTrailingWhitespaceOfFormattedLine) {
   EXPECT_EQ("int a;\nint b;", format("int a; \nint b;", 0, 0, getLLVMStyle()));
+  EXPECT_EQ("int a;", format("int a;         "));
+  EXPECT_EQ("int a;\n", format("int a;  \n   \n   \n "));
+  EXPECT_EQ("int a;\nint b;    ",
+            format("int a;  \nint b;    ", 0, 0, getLLVMStyle()));
+}
+
+TEST_F(FormatTest, FormatsCorrectRegionForLeadingWhitespace) {
+  EXPECT_EQ("int b;\nint a;",
+            format("int b;\n   int a;", 7, 0, getLLVMStyle()));
+  EXPECT_EQ("int b;\n   int a;",
+            format("int b;\n   int a;", 6, 0, getLLVMStyle()));
+
+  EXPECT_EQ("#define A  \\\n"
+            "  int a;   \\\n"
+            "  int b;",
+            format("#define A  \\\n"
+                   "  int a;   \\\n"
+                   "    int b;",
+                   26, 0, getLLVMStyleWithColumns(12)));
+  EXPECT_EQ("#define A  \\\n"
+            "  int a;   \\\n"
+            "    int b;",
+            format("#define A  \\\n"
+                   "  int a;   \\\n"
+                   "    int b;",
+                   25, 0, getLLVMStyleWithColumns(12)));
+}
+
+TEST_F(FormatTest, RemovesWhitespaceWhenTriggeredOnEmptyLine) {
+  EXPECT_EQ("int  a;\n\n int b;",
+            format("int  a;\n  \n\n int b;", 7, 0, getLLVMStyle()));
+  EXPECT_EQ("int  a;\n\n int b;",
+            format("int  a;\n  \n\n int b;", 9, 0, getLLVMStyle()));
 }
 
 TEST_F(FormatTest, ReformatsMovedLines) {
@@ -293,24 +326,26 @@ TEST_F(FormatTest, FormatsForLoop) {
       "     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
       "         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);\n"
       "     ++aaaaaaaaaaa) {\n}");
+  verifyFormat("for (int aaaaaaaaaaa = 1; aaaaaaaaaaa <= bbbbbbbbbbbbbbb;\n"
+               "     aaaaaaaaaaa++, bbbbbbbbbbbbbbbbb++) {\n"
+               "}");
 
-  verifyGoogleFormat(
-      "for (int aaaaaaaaaaa = 1; aaaaaaaaaaa <= bbbbbbbbbbbbbbb;\n"
-      "     aaaaaaaaaaa++, bbbbbbbbbbbbbbbbb++) {\n"
-      "}");
-  verifyGoogleFormat(
-      "for (int aaaaaaaaaaa = 1;\n"
-      "     aaaaaaaaaaa <= aaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaa,\n"
-      "                                           aaaaaaaaaaaaaaaa,\n"
-      "                                           aaaaaaaaaaaaaaaa,\n"
-      "                                           aaaaaaaaaaaaaaaa);\n"
-      "     aaaaaaaaaaa++, bbbbbbbbbbbbbbbbb++) {\n"
-      "}");
-  verifyGoogleFormat(
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat("for (int aaaaaaaaaaa = 1;\n"
+               "     aaaaaaaaaaa <= aaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaa,\n"
+               "                                           aaaaaaaaaaaaaaaa,\n"
+               "                                           aaaaaaaaaaaaaaaa,\n"
+               "                                           aaaaaaaaaaaaaaaa);\n"
+               "     aaaaaaaaaaa++, bbbbbbbbbbbbbbbbb++) {\n"
+               "}",
+               NoBinPacking);
+  verifyFormat(
       "for (std::vector<UnwrappedLine>::iterator I = UnwrappedLines.begin(),\n"
       "                                          E = UnwrappedLines.end();\n"
       "     I != E;\n"
-      "     ++I) {\n}");
+      "     ++I) {\n}",
+      NoBinPacking);
 }
 
 TEST_F(FormatTest, RangeBasedForLoops) {
@@ -318,6 +353,8 @@ TEST_F(FormatTest, RangeBasedForLoops) {
                "     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) {\n}");
   verifyFormat("for (auto aaaaaaaaaaaaaaaaaaaaa :\n"
                "     aaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaa, aaaaaaaaaaaaa)) {\n}");
+  verifyFormat("for (const aaaaaaaaaaaaaaaaaaaaa &aaaaaaaaa :\n"
+               "     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) {\n}");
 }
 
 TEST_F(FormatTest, FormatsWhileLoop) {
@@ -386,6 +423,15 @@ TEST_F(FormatTest, FormatsSwitchStatement) {
                "}");
   verifyFormat("switch (test)\n"
                "  ;");
+  verifyFormat("switch (x) {\n"
+               "default: {\n"
+               "  // Do nothing.\n"
+               "}");
+  verifyFormat("switch (x) {\n"
+               "// if 1, do f()\n"
+               "case 1:\n"
+               "  f();\n"
+               "}");
 
   verifyGoogleFormat("switch (x) {\n"
                      "  case 1:\n"
@@ -533,6 +579,13 @@ TEST_F(FormatTest, UnderstandsSingleLineComments) {
       "    aaaaaaaaaaaaaaaaaaaaaa);  // 81 cols with this comment");
 }
 
+TEST_F(FormatTest, RemovesTrailingWhitespaceOfComments) {
+  EXPECT_EQ("// comment", format("// comment  "));
+  EXPECT_EQ("int aaaaaaa, bbbbbbb; // comment",
+            format("int aaaaaaa, bbbbbbb; // comment                   ",
+                   getLLVMStyleWithColumns(33)));
+}
+
 TEST_F(FormatTest, UnderstandsMultiLineComments) {
   verifyFormat("f(/*test=*/ true);");
   EXPECT_EQ(
@@ -546,10 +599,56 @@ TEST_F(FormatTest, UnderstandsMultiLineComments) {
       format("f(aaaaaaaaaaaaaaaaaaaaaaaaa    ,   \n"
              "/* Leading comment for bb... */   bbbbbbbbbbbbbbbbbbbbbbbbb);"));
 
-  verifyGoogleFormat("aaaaaaaa(/* parameter 1 */ aaaaaa,\n"
-                     "         /* parameter 2 */ aaaaaa,\n"
-                     "         /* parameter 3 */ aaaaaa,\n"
-                     "         /* parameter 4 */ aaaaaa);");
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat("aaaaaaaa(/* parameter 1 */ aaaaaa,\n"
+               "         /* parameter 2 */ aaaaaa,\n"
+               "         /* parameter 3 */ aaaaaa,\n"
+               "         /* parameter 4 */ aaaaaa);",
+               NoBinPacking);
+}
+
+TEST_F(FormatTest, AlignsMultiLineComments) {
+  EXPECT_EQ("/*\n"
+            " * Really multi-line\n"
+            " * comment.\n"
+            " */\n"
+            "void f() {}",
+            format("  /*\n"
+                   "   * Really multi-line\n"
+                   "   * comment.\n"
+                   "   */\n"
+                   "  void f() {}"));
+  EXPECT_EQ("class C {\n"
+            "  /*\n"
+            "   * Another multi-line\n"
+            "   * comment.\n"
+            "   */\n"
+            "  void f() {}\n"
+            "};",
+            format("class C {\n"
+                   "/*\n"
+                   " * Another multi-line\n"
+                   " * comment.\n"
+                   " */\n"
+                   "void f() {}\n"
+                   "};"));
+  EXPECT_EQ("/*\n"
+            "  1. This is a comment with non-trivial formatting.\n"
+            "     1.1. We have to indent/outdent all lines equally\n"
+            "         1.1.1. to keep the formatting.\n"
+            " */",
+            format("  /*\n"
+                   "    1. This is a comment with non-trivial formatting.\n"
+                   "       1.1. We have to indent/outdent all lines equally\n"
+                   "           1.1.1. to keep the formatting.\n"
+                   "   */"));
+  EXPECT_EQ("/*\n"
+            " Don't try to outdent if there's not enough inentation.\n"
+            " */",
+            format("  /*\n"
+                   " Don't try to outdent if there's not enough inentation.\n"
+                   " */"));
 }
 
 TEST_F(FormatTest, CommentsInStaticInitializers) {
@@ -588,17 +687,28 @@ TEST_F(FormatTest, CommentsInStaticInitializers) {
 
   EXPECT_EQ("S s = {\n"
             "  // Some comment\n"
-            "  a\n"
+            "  a,\n"
             "\n"
             "  // Comment after empty line\n"
             "  b\n"
-            "}", format("S s =    {\n"
-                        "      // Some comment\n"
-                        "  a\n"
-                        "  \n"
-                        "     // Comment after empty line\n"
-                        "      b\n"
-                        "}"));
+            "}",
+            format("S s =    {\n"
+                   "      // Some comment\n"
+                   "  a,\n"
+                   "  \n"
+                   "     // Comment after empty line\n"
+                   "      b\n"
+                   "}"));
+  EXPECT_EQ("S s = { a, b };", format("S s = {\n"
+                                      "  a,\n"
+                                      "\n"
+                                      "  b\n"
+                                      "};"));
+  verifyFormat("const uint8_t aaaaaaaaaaaaaaaaaaaaaa[0] = {\n"
+               "  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // comment\n"
+               "  0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // comment\n"
+               "  0x00, 0x00, 0x00, 0x00              // comment\n"
+               "};");
 }
 
 //===----------------------------------------------------------------------===//
@@ -708,6 +818,16 @@ TEST_F(FormatTest, FormatsNamespaces) {
 }
 
 TEST_F(FormatTest, FormatsExternC) { verifyFormat("extern \"C\" {\nint a;"); }
+
+TEST_F(FormatTest, FormatsInlineASM) {
+  verifyFormat("asm(\"xyz\" : \"=a\"(a), \"=d\"(b) : \"a\"(data));");
+  verifyFormat(
+      "asm(\"movq\\t%%rbx, %%rsi\\n\\t\"\n"
+      "    \"cpuid\\n\\t\"\n"
+      "    \"xchgq\\t%%rbx, %%rsi\\n\\t\"\n"
+      "    : \"=a\" (*rEAX), \"=S\" (*rEBX), \"=c\" (*rECX), \"=d\" (*rEDX)\n"
+      "    : \"a\"(value));");
+}
 
 TEST_F(FormatTest, FormatTryCatch) {
   // FIXME: Handle try-catch explicitly in the UnwrappedLineParser, then we'll
@@ -844,29 +964,24 @@ TEST_F(FormatTest, EndOfFileEndsPPDirective) {
 }
 
 TEST_F(FormatTest, IndentsPPDirectiveInReducedSpace) {
-  // If the macro fits in one line, we still do not get the full
-  // line, as only the next line decides whether we need an escaped newline and
-  // thus use the last column.
-  verifyFormat("#define A(B)", getLLVMStyleWithColumns(13));
-
-  verifyFormat("#define A( \\\n    B)", getLLVMStyleWithColumns(12));
-  verifyFormat("#define AA(\\\n    B)", getLLVMStyleWithColumns(12));
+  verifyFormat("#define A(BB)", getLLVMStyleWithColumns(13));
+  verifyFormat("#define A( \\\n    BB)", getLLVMStyleWithColumns(12));
   verifyFormat("#define A( \\\n    A, B)", getLLVMStyleWithColumns(12));
+  // FIXME: We never break before the macro name.
+  verifyFormat("#define AA(\\\n    B)", getLLVMStyleWithColumns(12));
 
   verifyFormat("#define A A\n#define A A");
   verifyFormat("#define A(X) A\n#define A A");
 
-  verifyFormat("#define Something Other", getLLVMStyleWithColumns(24));
-  verifyFormat("#define Something     \\\n"
-               "  Other",
-               getLLVMStyleWithColumns(23));
+  verifyFormat("#define Something Other", getLLVMStyleWithColumns(23));
+  verifyFormat("#define Something    \\\n  Other", getLLVMStyleWithColumns(22));
 }
 
 TEST_F(FormatTest, HandlePreprocessorDirectiveContext) {
   EXPECT_EQ("// some comment\n"
             "#include \"a.h\"\n"
-            "#define A(A,\\\n"
-            "          B)\n"
+            "#define A(  \\\n"
+            "    A, B)\n"
             "#include \"b.h\"\n"
             "// some comment\n",
             format("  // some comment\n"
@@ -1132,13 +1247,16 @@ TEST_F(FormatTest, ConstructorInitializers) {
                "    : aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
                "          aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) {}");
 
+  verifyFormat("Constructor(int Parameter = 0)\n"
+               "    : aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaa),\n"
+               "      aaaaaaaaaaaa(aaaaaaaaaaaaaaaaa) {}");
+
   // Here a line could be saved by splitting the second initializer onto two
   // lines, but that is not desireable.
-  verifyFormat(
-      "Constructor()\n"
-      "    : aaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaa),\n"
-      "      aaaaaaaaaaa(aaaaaaaaaaa),\n"
-      "      aaaaaaaaaaaaaaaaaaaaat(aaaaaaaaaaaaaaaaaaaaaaaaaaaa) {}");
+  verifyFormat("Constructor()\n"
+               "    : aaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaa),\n"
+               "      aaaaaaaaaaa(aaaaaaaaaaa),\n"
+               "      aaaaaaaaaaaaaaaaaaaaat(aaaaaaaaaaaaaaaaaaaaaaaaaaaa) {}");
 
   FormatStyle OnePerLine = getLLVMStyle();
   OnePerLine.ConstructorInitializerAllOnOneLineOrOnePerLine = true;
@@ -1157,22 +1275,34 @@ TEST_F(FormatTest, ConstructorInitializers) {
                "      some_other_var_(var + 1) { // lined up\n"
                "}",
                OnePerLine);
+  verifyFormat("Constructor()\n"
+               "    : aaaaa(aaaaaa),\n"
+               "      aaaaa(aaaaaa),\n"
+               "      aaaaa(aaaaaa),\n"
+               "      aaaaa(aaaaaa),\n"
+               "      aaaaa(aaaaaa) {}",
+               OnePerLine);
 
   // This test takes VERY long when memoization is broken.
+  OnePerLine.BinPackParameters = false;
   std::string input = "Constructor()\n"
                       "    : aaaa(a,\n";
   for (unsigned i = 0, e = 80; i != e; ++i) {
     input += "           a,\n";
   }
   input += "           a) {}";
-  verifyGoogleFormat(input);
+  verifyFormat(input, OnePerLine);
 }
 
 TEST_F(FormatTest, BreaksAsHighAsPossible) {
   verifyFormat(
-      "if ((aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa && aaaaaaaaaaaaaaaaaaaaaaaaaa) ||\n"
-      "    (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb && bbbbbbbbbbbbbbbbbbbbbbbbbb))\n"
-      "  f();");
+      "void f() {\n"
+      "  if ((aaaaaaaaaaaaaaaaaaaaaaaaaaaaa && aaaaaaaaaaaaaaaaaaaaaaaaaa) ||\n"
+      "      (bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb && bbbbbbbbbbbbbbbbbbbbbbbbbb))\n"
+      "    f();\n"
+      "}");
+  verifyFormat("if (Intervals[i].getRange().getFirst() <\n"
+               "    Intervals[i - 1].getRange().getLast()) {\n}");
 }
 
 TEST_F(FormatTest, BreaksDesireably) {
@@ -1201,8 +1331,10 @@ TEST_F(FormatTest, BreaksDesireably) {
                "    (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);");
 
   verifyFormat(
-      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&\n"
-      "                                 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);");
+      "void f() {\n"
+      "  aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa &&\n"
+      "                                 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);\n"
+      "}");
   verifyFormat(
       "aaaaaa(new Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
       "    aaaaaaaaaaaaaaaaaaaaaaaaaaaaa));");
@@ -1226,54 +1358,60 @@ TEST_F(FormatTest, BreaksDesireably) {
 }
 
 TEST_F(FormatTest, FormatsOneParameterPerLineIfNecessary) {
-  verifyGoogleFormat("f(aaaaaaaaaaaaaaaaaaaa,\n"
-                     "  aaaaaaaaaaaaaaaaaaaa,\n"
-                     "  aaaaaaaaaaaaaaaaaaaa + aaaaaaaaaaaaaaaaaaaa);");
-  verifyGoogleFormat(
-      "aaaaaaa(aaaaaaaaaaaaa,\n"
-      "        aaaaaaaaaaaaa,\n"
-      "        aaaaaaaaaaaaa(aaaaaaaaaaaaaaaaa, aaaaaaaaaaaaaaaa));");
-  verifyGoogleFormat(
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat("f(aaaaaaaaaaaaaaaaaaaa,\n"
+               "  aaaaaaaaaaaaaaaaaaaa,\n"
+               "  aaaaaaaaaaaaaaaaaaaa + aaaaaaaaaaaaaaaaaaaa);",
+               NoBinPacking);
+  verifyFormat("aaaaaaa(aaaaaaaaaaaaa,\n"
+               "        aaaaaaaaaaaaa,\n"
+               "        aaaaaaaaaaaaa(aaaaaaaaaaaaaaaaa, aaaaaaaaaaaaaaaa));",
+               NoBinPacking);
+  verifyFormat(
       "aaaaaaaa(aaaaaaaaaaaaa,\n"
       "         aaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
       "             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)),\n"
       "         aaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
-      "             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)));");
-  verifyGoogleFormat(
-      "aaaaaaaaaaaaaaa(aaaaaaaaa, aaaaaaaaa, aaaaaaaaaaaaaaaaaaaaa)\n"
-      "    .aaaaaaaaaaaaaaaaaa();");
-  verifyGoogleFormat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
-                     "    aaaaaaaaaa, aaaaaaaaaa, aaaaaaaaaa, aaaaaaaaaaa);");
+      "             aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)));",
+      NoBinPacking);
+  verifyFormat("aaaaaaaaaaaaaaa(aaaaaaaaa, aaaaaaaaa, aaaaaaaaaaaaaaaaaaaaa)\n"
+               "    .aaaaaaaaaaaaaaaaaa();",
+               NoBinPacking);
+  verifyFormat("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
+               "    aaaaaaaaaa, aaaaaaaaaa, aaaaaaaaaa, aaaaaaaaaaa);",
+               NoBinPacking);
 
-  verifyGoogleFormat(
+  verifyFormat(
       "aaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaa + aaaaaaaaaaaaaaaaaaaaaaaaa,\n"
       "             aaaaaaaaaaaa,\n"
-      "             aaaaaaaaaaaa);");
-  verifyGoogleFormat(
+      "             aaaaaaaaaaaa);",
+      NoBinPacking);
+  verifyFormat(
       "somefunction(someotherFunction(ddddddddddddddddddddddddddddddddddd,\n"
       "                               ddddddddddddddddddddddddddddd),\n"
-      "             test);");
+      "             test);",
+      NoBinPacking);
 
-  verifyGoogleFormat(
-      "std::vector<aaaaaaaaaaaaaaaaaaaaaaa,\n"
-      "            aaaaaaaaaaaaaaaaaaaaaaa,\n"
-      "            aaaaaaaaaaaaaaaaaaaaaaa> aaaaaaaaaaaaaaaaaa;");
-  verifyGoogleFormat("a(\"a\"\n"
-                     "  \"a\",\n"
-                     "  a);");
+  verifyFormat("std::vector<aaaaaaaaaaaaaaaaaaaaaaa,\n"
+               "            aaaaaaaaaaaaaaaaaaaaaaa,\n"
+               "            aaaaaaaaaaaaaaaaaaaaaaa> aaaaaaaaaaaaaaaaaa;",
+               NoBinPacking);
+  verifyFormat("a(\"a\"\n"
+               "  \"a\",\n"
+               "  a);");
 
-  FormatStyle Style = getGoogleStyle();
-  Style.AllowAllParametersOfDeclarationOnNextLine = false;
+  NoBinPacking.AllowAllParametersOfDeclarationOnNextLine = false;
   verifyFormat("void aaaaaaaaaa(aaaaaaaaa,\n"
                "                aaaaaaaaa,\n"
                "                aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);",
-               Style);
+               NoBinPacking);
   verifyFormat(
       "void f() {\n"
       "  aaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaa, aaaaaaaaa, aaaaaaaaaaaaaaaaaaaaa)\n"
       "      .aaaaaaa();\n"
       "}",
-      Style);
+      NoBinPacking);
 }
 
 TEST_F(FormatTest, FormatsBuilderPattern) {
@@ -1292,7 +1430,7 @@ TEST_F(FormatTest, FormatsBuilderPattern) {
       "    ->aaaaaaaa(aaaaaaaaaaaaaaa);");
   verifyFormat(
       "aaaaaaaaaaaaaaaaaaa()->aaaaaa(bbbbb)->aaaaaaaaaaaaaaaaaaa( // break\n"
-      "                                        aaaaaaaaaaaaaa);");
+      "    aaaaaaaaaaaaaa);");
   verifyFormat(
       "aaaaaaaaaaaaaaaaaaaaaaa *aaaaaaaaa = aaaaaa->aaaaaaaaaaaa()\n"
       "    ->aaaaaaaaaaaaaaaa(\n"
@@ -1302,11 +1440,23 @@ TEST_F(FormatTest, FormatsBuilderPattern) {
 
 TEST_F(FormatTest, DoesNotBreakTrailingAnnotation) {
   verifyFormat("void aaaaaaaaaaaa(int aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)\n"
-               "    GUARDED_BY(aaaaaaaaaaaaa);");
+               "    LOCKS_EXCLUDED(aaaaaaaaaaaaa);");
   verifyFormat("void aaaaaaaaaaaa(int aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) const\n"
-               "    GUARDED_BY(aaaaaaaaaaaaa);");
+               "    LOCKS_EXCLUDED(aaaaaaaaaaaaa);");
   verifyFormat("void aaaaaaaaaaaa(int aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) const\n"
-               "    GUARDED_BY(aaaaaaaaaaaaa) {}");
+               "    LOCKS_EXCLUDED(aaaaaaaaaaaaa) {}");
+  verifyFormat(
+      "void aaaaaaaaaaaaaaaaaa()\n"
+      "    __attribute__((aaaaaaaaaaaaaaaaaaaaaaaaa, aaaaaaaaaaaaaaaaaaaaaaa,\n"
+      "                   aaaaaaaaaaaaaaaaaaaaaaaaa));");
+  verifyFormat("bool aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+               "    __attribute__((unused));");
+  
+  // FIXME: This is bad indentation, but generally hard to distinguish from a
+  // function declaration.
+  verifyFormat(
+      "bool aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+      "GUARDED_BY(aaaaaaaaaaaa);");
 }
 
 TEST_F(FormatTest, BreaksAccordingToOperatorPrecedence) {
@@ -1418,14 +1568,17 @@ TEST_F(FormatTest, BreaksConditionalExpressions) {
       "           TheLine.InPPDirective, PreviousEndOfLineColumn);",
       getLLVMStyleWithColumns(70));
 
-  verifyGoogleFormat(
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat(
       "void f() {\n"
       "  g(aaa,\n"
       "    aaaaaaaaaa == aaaaaaaaaa ? aaaa : aaaaa,\n"
       "    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa == aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
       "        ? aaaaaaaaaaaaaaa\n"
       "        : aaaaaaaaaaaaaaa);\n"
-      "}");
+      "}",
+      NoBinPacking);
 }
 
 TEST_F(FormatTest, DeclarationsOfMultipleVariables) {
@@ -1518,6 +1671,8 @@ TEST_F(FormatTest, AlignsPipes) {
       "             << \"ccccccccccccccccc = \" << ccccccccccccccccc\n"
       "             << \"ddddddddddddddddd = \" << ddddddddddddddddd\n"
       "             << \"eeeeeeeeeeeeeeeee = \" << eeeeeeeeeeeeeeeee;");
+  verifyFormat("llvm::outs() << aaaaaaaaaaaaaaaaaaaaaaaa << \"=\"\n"
+               "             << bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb;");
 }
 
 TEST_F(FormatTest, UnderstandsEquals) {
@@ -1565,13 +1720,12 @@ TEST_F(FormatTest, WrapsAtFunctionCallsIfNecessary) {
                "    .WillRepeatedly(Return(SomeValue));");
   verifyFormat("SomeMap[std::pair(aaaaaaaaaaaa, bbbbbbbbbbbbbbb)]\n"
                "    .insert(ccccccccccccccccccccccc);");
-
-  verifyGoogleFormat(
-      "aaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaa)\n"
-      "    .aaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaa)\n"
-      "    .aaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaa,\n"
-      "                         aaaaaaaaaaaaaaaaaaa,\n"
-      "                         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);");
+  verifyFormat(
+      "aaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+      "      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)\n"
+      "    .aaaaaaaaaaaaaaa(\n"
+      "        aa(aaaaaaaaaaaaaaaaaaaaaaaaaaa, aaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+      "           aaaaaaaaaaaaaaaaaaaaaaaaaaa));");
 
   // Here, it is not necessary to wrap at "." or "->".
   verifyFormat("if (aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaa) ||\n"
@@ -1584,6 +1738,23 @@ TEST_F(FormatTest, WrapsAtFunctionCallsIfNecessary) {
   verifyFormat(
       "aaaaaaaaaaaaaaaaaaaaaaaaa(\n"
       "    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa().aaaaaaaaaaaaaaaaa());");
+  verifyFormat("a->aaaaaa()->aaaaaaaaaaa(aaaaaaaa()->aaaaaa()->aaaaa() *\n"
+               "                         aaaaaaaaa()->aaaaaa()->aaaaa());");
+  verifyFormat("a->aaaaaa()->aaaaaaaaaaa(aaaaaaaa()->aaaaaa()->aaaaa() ||\n"
+               "                         aaaaaaaaa()->aaaaaa()->aaaaa());");
+
+  // FIXME: Should we break before .a()?
+  verifyFormat("aaaaa(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+               "      aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa).a();");
+
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat("aaaaaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaa)\n"
+               "    .aaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaaaa)\n"
+               "    .aaaaaaaaaaaaaaaaaaa(aaaaaaaaaaaaaaaaaaa,\n"
+               "                         aaaaaaaaaaaaaaaaaaa,\n"
+               "                         aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa);",
+               NoBinPacking);
 }
 
 TEST_F(FormatTest, WrapsTemplateDeclarations) {
@@ -1679,6 +1850,11 @@ TEST_F(FormatTest, UnderstandsTemplateParameters) {
   verifyFormat("template <typename T> void f() {}");
 }
 
+TEST_F(FormatTest, UnderstandsBinaryOperators) {
+  verifyFormat("COMPARE(a, ==, b);");
+  verifyFormat("(a->*f)()");
+}
+
 TEST_F(FormatTest, UnderstandsUnaryOperators) {
   verifyFormat("int a = -2;");
   verifyFormat("f(-1, -2, -3);");
@@ -1759,7 +1935,7 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyFormat("int main(int argc, char **argv) {}");
   verifyFormat("Test::Test(int b) : a(b * b) {}");
   verifyIndependentOfContext("f(a, *a);");
-  verifyIndependentOfContext("f(*a);");
+  verifyFormat("void g() { f(*a); }");
   verifyIndependentOfContext("int a = b * 10;");
   verifyIndependentOfContext("int a = 10 * b;");
   verifyIndependentOfContext("int a = b * c;");
@@ -1783,6 +1959,7 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyIndependentOfContext("a * ++b;");
   verifyIndependentOfContext("a * --b;");
   verifyIndependentOfContext("a[4] * b;");
+  verifyIndependentOfContext("a[a * a] = 1;");
   verifyIndependentOfContext("f() * b;");
   verifyIndependentOfContext("a * [self dostuff];");
   verifyIndependentOfContext("a * (a + b);");
@@ -1791,6 +1968,7 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyIndependentOfContext("return sizeof(int **);");
   verifyIndependentOfContext("return sizeof(int ******);");
   verifyIndependentOfContext("return (int **&)a;");
+  verifyFormat("void f(Type (*parameter)[10]) {}");
   verifyGoogleFormat("return sizeof(int**);");
   verifyIndependentOfContext("Type **A = static_cast<Type **>(P);");
   verifyGoogleFormat("Type** A = static_cast<Type**>(P);");
@@ -1806,6 +1984,7 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
       "const char *const p = reinterpret_cast<const char *const>(q);");
   verifyIndependentOfContext("A<int **, int **> a;");
   verifyIndependentOfContext("void f(int *a = d * e, int *b = c * d);");
+  verifyFormat("for (char **a = b; *a; ++a) {\n}");
 
   verifyFormat(
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(\n"
@@ -1830,7 +2009,7 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyIndependentOfContext("a = &(x + y);");
   verifyIndependentOfContext("*(x + y).call();");
   verifyIndependentOfContext("&(x + y)->call();");
-  verifyIndependentOfContext("&(*I).first");
+  verifyFormat("void f() { &(*I).first; }");
 
   verifyIndependentOfContext("f(b * /* confusing comment */ ++c);");
   verifyFormat(
@@ -1853,9 +2032,13 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
   verifyFormat("for (int i = a * a; i < 10; ++i) {\n}");
   verifyFormat("for (int i = 0; i < a * a; ++i) {\n}");
 
+  verifyIndependentOfContext("A = new SomeType *[Length];");
   verifyIndependentOfContext("A = new SomeType *[Length]();");
   verifyGoogleFormat("A = new SomeType* [Length]();");
+  verifyGoogleFormat("A = new SomeType* [Length];");
+}
 
+TEST_F(FormatTest, AdaptivelyFormatsPointersAndReferences) {
   EXPECT_EQ("int *a;\n"
             "int *a;\n"
             "int *a;",
@@ -1877,6 +2060,21 @@ TEST_F(FormatTest, UnderstandsUsesOfStarAndAmp) {
                    "int * a;\n"
                    "int *  a;",
                    getGoogleStyle()));
+}
+
+TEST_F(FormatTest, UnderstandsRvalueReferences) {
+  verifyFormat("int f(int &&a) {}");
+  verifyFormat("int f(int a, char &&b) {}");
+  verifyFormat("void f() { int &&a = b; }");
+  verifyGoogleFormat("int f(int a, char&& b) {}");
+  verifyGoogleFormat("void f() { int&& a = b; }");
+
+  // FIXME: These require somewhat deeper changes in template arguments
+  // formatting.
+  //  verifyIndependentOfContext("A<int &&> a;");
+  //  verifyIndependentOfContext("A<int &&, int &&> a;");
+  //  verifyGoogleFormat("A<int&&> a;");
+  //  verifyGoogleFormat("A<int&&, int&&> a;");
 }
 
 TEST_F(FormatTest, FormatsBinaryOperatorsPrecedingEquals) {
@@ -1915,20 +2113,23 @@ TEST_F(FormatTest, FormatsCasts) {
   verifyFormat("void f(int i = (kA * kB) & kMask) {}");
   verifyFormat("int a = sizeof(int) * b;");
   verifyFormat("int a = alignof(int) * b;");
-  
+
   // These are not casts, but at some point were confused with casts.
   verifyFormat("virtual void foo(int *) override;");
   verifyFormat("virtual void foo(char &) const;");
   verifyFormat("virtual void foo(int *a, char *) const;");
+  verifyFormat("int a = sizeof(int *) + b;");
+  verifyFormat("int a = alignof(int *) + b;");
 }
 
 TEST_F(FormatTest, FormatsFunctionTypes) {
-  // FIXME: Determine the cases that need a space after the return type and fix.
   verifyFormat("A<bool()> a;");
   verifyFormat("A<SomeType()> a;");
   verifyFormat("A<void(*)(int, std::string)> a;");
 
-  verifyFormat("int(*func)(void *);");
+  // FIXME: Inconsistent.
+  verifyFormat("int (*func)(void *);");
+  verifyFormat("void f() { int(*func)(void *); }");
 }
 
 TEST_F(FormatTest, BreaksLongDeclarations) {
@@ -1950,8 +2151,8 @@ TEST_F(FormatTest, BreaksLongDeclarations) {
       "aaaaaaaaaaaaaaaaaaaaaaa;");
 
   verifyGoogleFormat(
-      "TypeSpecDecl* TypeSpecDecl::Create(\n"
-      "    ASTContext& C, DeclContext* DC, SourceLocation L) {}");
+      "TypeSpecDecl* TypeSpecDecl::Create(ASTContext& C, DeclContext* DC,\n"
+      "                                   SourceLocation L) {}");
   verifyGoogleFormat(
       "some_namespace::LongReturnType\n"
       "long_namespace::SomeVeryLongClass::SomeVeryLongFunction(\n"
@@ -1960,6 +2161,8 @@ TEST_F(FormatTest, BreaksLongDeclarations) {
   verifyGoogleFormat("template <typename T>\n"
                      "aaaaaaaa::aaaaa::aaaaaa<T, aaaaaaaaaaaaaaaaaaaaaaaaa>\n"
                      "aaaaaaaaaaaaaaaaaaaaaaaa<T>::aaaaaaa() {}");
+  verifyGoogleFormat("A<A<A>> aaaaaaaaaa(int aaaaaaaaaaaaaaaaaaaaaaaaaaa,\n"
+                     "                   int aaaaaaaaaaaaaaaaaaaaaaa);");
 }
 
 TEST_F(FormatTest, LineStartsWithSpecialCharacter) {
@@ -1990,13 +2193,16 @@ TEST_F(FormatTest, HandlesIncludeDirectives) {
 //===----------------------------------------------------------------------===//
 
 TEST_F(FormatTest, IncompleteParameterLists) {
-  verifyGoogleFormat("void aaaaaaaaaaaaaaaaaa(int level,\n"
-                     "                        double *min_x,\n"
-                     "                        double *max_x,\n"
-                     "                        double *min_y,\n"
-                     "                        double *max_y,\n"
-                     "                        double *min_z,\n"
-                     "                        double *max_z, ) {}");
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
+  verifyFormat("void aaaaaaaaaaaaaaaaaa(int level,\n"
+               "                        double *min_x,\n"
+               "                        double *max_x,\n"
+               "                        double *min_y,\n"
+               "                        double *max_y,\n"
+               "                        double *min_z,\n"
+               "                        double *max_z, ) {}",
+               NoBinPacking);
 }
 
 TEST_F(FormatTest, IncorrectCodeTrailingStuff) {
@@ -2270,6 +2476,8 @@ TEST_F(FormatTest, BlockComments) {
                    "/* */someCall(parameter);",
                    getLLVMStyleWithColumns(15)));
 
+  FormatStyle NoBinPacking = getLLVMStyle();
+  NoBinPacking.BinPackParameters = false;
   EXPECT_EQ("someFunction(1, /* comment 1 */\n"
             "             2, /* comment 2 */\n"
             "             3, /* comment 3 */\n"
@@ -2279,7 +2487,7 @@ TEST_F(FormatTest, BlockComments) {
                    "                2, /* comment 2 */  \n"
                    "               3,   /* comment 3 */\n"
                    "aaaa, bbbb );",
-                   getGoogleStyle()));
+                   NoBinPacking));
   verifyFormat(
       "bool aaaaaaaaaaaaa = /* comment: */ aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ||\n"
       "                     aaaaaaaaaaaaaaaaaaaaaaaaaaaa;");
@@ -2949,8 +3157,17 @@ TEST_F(FormatTest, BreakStringLiterals) {
   EXPECT_EQ("\"some \"\n"
             "\"text\"",
             format("\"some text\"", getLLVMStyleWithColumns(7)));
-  EXPECT_EQ("\"some text\"",
+  EXPECT_EQ("\"some\"\n"
+            "\" text\"",
             format("\"some text\"", getLLVMStyleWithColumns(6)));
+  EXPECT_EQ("\"some\"\n"
+            "\" tex\"\n"
+            "\" and\"",
+            format("\"some tex and\"", getLLVMStyleWithColumns(6)));
+  EXPECT_EQ("\"some\"\n"
+            "\"/tex\"\n"
+            "\"/and\"",
+            format("\"some/tex/and\"", getLLVMStyleWithColumns(6)));
 
   EXPECT_EQ("variable =\n"
             "    \"long string \"\n"
@@ -2960,7 +3177,8 @@ TEST_F(FormatTest, BreakStringLiterals) {
 
   EXPECT_EQ("variable = f(\n"
             "    \"long string \"\n"
-            "    \"literal\", short,\n"
+            "    \"literal\",\n"
+            "    short,\n"
             "    loooooooooooooooooooong);",
             format("variable = f(\"long string literal\", short, "
                    "loooooooooooooooooooong);",
@@ -2980,6 +3198,63 @@ TEST_F(FormatTest, BreakStringLiterals) {
             "  \"text\",\n"
             "  other);",
             format("f(\"some text\", other);", getLLVMStyleWithColumns(10)));
+
+  // Only break as a last resort.
+  verifyFormat(
+      "aaaaaaaaaaaaaaaaaaaa(\n"
+      "    aaaaaaaaaaaaaaaaaaaa,\n"
+      "    aaaaaa(\"aaa aaaaa aaa aaa aaaaa aaa aaaaa aaa aaa aaaaaa\"));");
+
+  EXPECT_EQ(
+      "\"splitmea\"\n"
+      "\"trandomp\"\n"
+      "\"oint\"",
+      format("\"splitmeatrandompoint\"", getLLVMStyleWithColumns(10)));
+
+  EXPECT_EQ(
+      "\"split/\"\n"
+      "\"pathat/\"\n"
+      "\"slashes\"",
+      format("\"split/pathat/slashes\"", getLLVMStyleWithColumns(10)));
+}
+
+TEST_F(FormatTest, DoNotBreakStringLiteralsInEscapeSequence) {
+  EXPECT_EQ("\"\\a\"",
+            format("\"\\a\"", getLLVMStyleWithColumns(3)));
+  EXPECT_EQ("\"\\\"",
+            format("\"\\\"", getLLVMStyleWithColumns(2)));
+  EXPECT_EQ("\"test\"\n"
+            "\"\\n\"",
+            format("\"test\\n\"", getLLVMStyleWithColumns(7)));
+  EXPECT_EQ("\"tes\\\\\"\n"
+            "\"n\"",
+            format("\"tes\\\\n\"", getLLVMStyleWithColumns(7)));
+  EXPECT_EQ("\"\\\\\\\\\"\n"
+            "\"\\n\"",
+            format("\"\\\\\\\\\\n\"", getLLVMStyleWithColumns(7)));
+  EXPECT_EQ("\"\\uff01\"",
+            format("\"\\uff01\"", getLLVMStyleWithColumns(7)));
+  EXPECT_EQ("\"\\uff01\"\n"
+            "\"test\"",
+            format("\"\\uff01test\"", getLLVMStyleWithColumns(8)));
+  EXPECT_EQ("\"\\Uff01ff02\"",
+            format("\"\\Uff01ff02\"", getLLVMStyleWithColumns(11)));
+  EXPECT_EQ("\"\\x000000000001\"\n"
+            "\"next\"",
+            format("\"\\x000000000001next\"", getLLVMStyleWithColumns(16)));
+  EXPECT_EQ("\"\\x000000000001next\"",
+            format("\"\\x000000000001next\"", getLLVMStyleWithColumns(15)));
+  EXPECT_EQ("\"\\x000000000001\"",
+            format("\"\\x000000000001\"", getLLVMStyleWithColumns(7)));
+  EXPECT_EQ("\"test\"\n"
+            "\"\\000000\"\n"
+            "\"000001\"",
+            format("\"test\\000000000001\"", getLLVMStyleWithColumns(9)));
+  EXPECT_EQ("\"test\\000\"\n"
+            "\"000000001\"",
+            format("\"test\\000000000001\"", getLLVMStyleWithColumns(10)));
+  EXPECT_EQ("R\"(\\x\\x00)\"\n",
+            format("R\"(\\x\\x00)\"\n", getLLVMStyleWithColumns(7)));
 }
 
 } // end namespace tooling

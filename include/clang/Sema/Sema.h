@@ -200,6 +200,8 @@ class Sema {
   ///\brief Whether Sema has generated a multiplexer and has to delete it.
   bool isMultiplexExternalSource;
 
+  static bool mightHaveNonExternalLinkage(const DeclaratorDecl *FD);
+
 public:
   typedef OpaquePtr<DeclGroupRef> DeclGroupPtrTy;
   typedef OpaquePtr<TemplateName> TemplateTy;
@@ -944,12 +946,39 @@ public:
                           SourceRange Brackets, DeclarationName Entity);
   QualType BuildExtVectorType(QualType T, Expr *ArraySize,
                               SourceLocation AttrLoc);
+
+  /// \brief Build a function type.
+  ///
+  /// This routine checks the function type according to C++ rules and
+  /// under the assumption that the result type and parameter types have
+  /// just been instantiated from a template. It therefore duplicates
+  /// some of the behavior of GetTypeForDeclarator, but in a much
+  /// simpler form that is only suitable for this narrow use case.
+  ///
+  /// \param T The return type of the function.
+  ///
+  /// \param ParamTypes The parameter types of the function. This array
+  /// will be modified to account for adjustments to the types of the
+  /// function parameters.
+  ///
+  /// \param Loc The location of the entity whose type involves this
+  /// function type or, if there is no such entity, the location of the
+  /// type that will have function type.
+  ///
+  /// \param Entity The name of the entity that involves the function
+  /// type, if known.
+  ///
+  /// \param EPI Extra information about the function type. Usually this will
+  /// be taken from an existing function with the same prototype.
+  ///
+  /// \returns A suitable function type, if there are no errors. The
+  /// unqualified type will always be a FunctionProtoType.
+  /// Otherwise, returns a NULL type.
   QualType BuildFunctionType(QualType T,
-                             QualType *ParamTypes, unsigned NumParamTypes,
-                             bool Variadic, bool HasTrailingReturn,
-                             unsigned Quals, RefQualifierKind RefQualifier,
+                             llvm::MutableArrayRef<QualType> ParamTypes,
                              SourceLocation Loc, DeclarationName Entity,
-                             FunctionType::ExtInfo Info);
+                             const FunctionProtoType::ExtProtoInfo &EPI);
+
   QualType BuildMemberPointerType(QualType T, QualType Class,
                                   SourceLocation Loc,
                                   DeclarationName Entity);
@@ -2340,6 +2369,7 @@ public:
 
   // More parsing and symbol table subroutines.
 
+  void ProcessPragmaWeak(Scope *S, Decl *D);
   // Decl attributes - this routine is the top level dispatcher.
   void ProcessDeclAttributes(Scope *S, Decl *D, const Declarator &PD,
                              bool NonInheritable = true,
@@ -6910,12 +6940,10 @@ public:
   /// given type.
   ExprResult forceUnknownAnyToType(Expr *E, QualType ToType);
 
-  /// \brief Handle an expression that's being passed to an
+  /// \brief Type-check an expression that's being passed to an
   /// __unknown_anytype parameter.
-  ///
-  /// \return the effective parameter type to use, or null if the
-  ///   argument is invalid.
-  QualType checkUnknownAnyArg(Expr *&result);
+  ExprResult checkUnknownAnyArg(SourceLocation callLoc,
+                                Expr *result, QualType &paramType);
 
   // CheckVectorCast - check type constraints for vectors.
   // Since vectors are an extension, there are no C standard reference for this.
@@ -7402,6 +7430,8 @@ private:
   /// The parser maintains this state here.
   Scope *CurScope;
 
+  mutable IdentifierInfo *Ident_super;
+
 protected:
   friend class Parser;
   friend class InitializationSequence;
@@ -7418,6 +7448,8 @@ public:
   /// itself and in routines directly invoked from the parser and *never* from
   /// template substitution or instantiation.
   Scope *getCurScope() const { return CurScope; }
+
+  IdentifierInfo *getSuperIdentifier() const;
 
   Decl *getObjCDeclContext() const;
 

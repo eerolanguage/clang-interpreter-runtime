@@ -211,87 +211,17 @@ public:
   /// a C++ class.
   bool isCXXInstanceMember() const;
 
-  class LinkageInfo {
-    uint8_t linkage_    : 2;
-    uint8_t visibility_ : 2;
-    uint8_t explicit_   : 1;
-
-    void setVisibility(Visibility V, bool E) { visibility_ = V; explicit_ = E; }
-  public:
-    LinkageInfo() : linkage_(ExternalLinkage), visibility_(DefaultVisibility),
-                    explicit_(false) {}
-    LinkageInfo(Linkage L, Visibility V, bool E)
-      : linkage_(L), visibility_(V), explicit_(E) {
-      assert(linkage() == L && visibility() == V && visibilityExplicit() == E &&
-             "Enum truncated!");
-    }
-
-    static LinkageInfo external() {
-      return LinkageInfo();
-    }
-    static LinkageInfo internal() {
-      return LinkageInfo(InternalLinkage, DefaultVisibility, false);
-    }
-    static LinkageInfo uniqueExternal() {
-      return LinkageInfo(UniqueExternalLinkage, DefaultVisibility, false);
-    }
-    static LinkageInfo none() {
-      return LinkageInfo(NoLinkage, DefaultVisibility, false);
-    }
-
-    Linkage linkage() const { return (Linkage)linkage_; }
-    Visibility visibility() const { return (Visibility)visibility_; }
-    bool visibilityExplicit() const { return explicit_; }
-
-    void setLinkage(Linkage L) { linkage_ = L; }
-
-    void mergeLinkage(Linkage L) {
-      setLinkage(minLinkage(linkage(), L));
-    }
-    void mergeLinkage(LinkageInfo other) {
-      mergeLinkage(other.linkage());
-    }
-
-    /// Merge in the visibility 'newVis'.
-    void mergeVisibility(Visibility newVis, bool newExplicit) {
-      Visibility oldVis = visibility();
-
-      // Never increase visibility.
-      if (oldVis < newVis)
-        return;
-
-      // If the new visibility is the same as the old and the new
-      // visibility isn't explicit, we have nothing to add.
-      if (oldVis == newVis && !newExplicit)
-        return;
-
-      // Otherwise, we're either decreasing visibility or making our
-      // existing visibility explicit.
-      setVisibility(newVis, newExplicit);
-    }
-    void mergeVisibility(LinkageInfo other) {
-      mergeVisibility(other.visibility(), other.visibilityExplicit());
-    }
-
-    /// Merge both linkage and visibility.
-    void merge(LinkageInfo other) {
-      mergeLinkage(other);
-      mergeVisibility(other);
-    }
-
-    /// Merge linkage and conditionally merge visibility.
-    void mergeMaybeWithVisibility(LinkageInfo other, bool withVis) {
-      mergeLinkage(other);
-      if (withVis) mergeVisibility(other);
-    }
-  };
-
   /// \brief Determine what kind of linkage this entity has.
   Linkage getLinkage() const;
 
+  /// \brief True if this decl has external linkage.
+  bool hasExternalLinkage() const {
+    return getLinkage() == ExternalLinkage;
+  }
+
   /// \brief Determines the visibility of this entity.
   Visibility getVisibility() const {
-    return getLinkageAndVisibility().visibility();
+    return getLinkageAndVisibility().getVisibility();
   }
 
   /// \brief Determines the linkage and visibility of this entity.
@@ -308,9 +238,9 @@ public:
   Optional<Visibility>
   getExplicitVisibility(ExplicitVisibilityKind kind) const;
 
-  /// \brief Clear the linkage cache in response to a change
-  /// to the declaration.
-  void ClearLinkageCache();
+  /// \brief True if the computed linkage is valid. Used for consistency
+  /// checking. Should always return true.
+  bool isLinkageValid() const;
 
   /// \brief Looks through UsingDecls and ObjCCompatibleAliasDecls for
   /// the underlying named decl.
@@ -868,11 +798,18 @@ public:
     return getStorageClass() == SC_Static && !isFileVarDecl();
   }
 
-  /// hasExternStorage - Returns true if a variable has extern or
-  /// __private_extern__ storage.
+  /// \brief Returns true if a variable has extern or __private_extern__
+  /// storage.
   bool hasExternalStorage() const {
     return getStorageClass() == SC_Extern ||
            getStorageClass() == SC_PrivateExtern;
+  }
+
+  /// \brief Returns true if a variable was written with extern or
+  /// __private_extern__ storage.
+  bool hasExternalStorageAsWritten() const {
+    return getStorageClassAsWritten() == SC_Extern ||
+           getStorageClassAsWritten() == SC_PrivateExtern;
   }
 
   /// hasGlobalStorage - Returns true for all variables that do not
@@ -885,9 +822,7 @@ public:
 
   /// \brief Determines whether this variable is a variable with
   /// external, C linkage.
-  bool isExternC() const {
-    return getLanguageLinkage() == CLanguageLinkage;
-  }
+  bool isExternC() const;
 
   /// isLocalVarDecl - Returns true for local variable declarations
   /// other than parameters.  Note that this includes static variables
@@ -1776,9 +1711,7 @@ public:
 
   /// \brief Determines whether this function is a function with
   /// external, C linkage.
-  bool isExternC() const {
-    return getLanguageLinkage() == CLanguageLinkage;
-  }
+  bool isExternC() const;
 
   /// \brief Determines whether this is a global function.
   bool isGlobal() const;
@@ -2632,6 +2565,25 @@ public:
   bool isUnion()  const { return getTagKind() == TTK_Union; }
   bool isEnum()   const { return getTagKind() == TTK_Enum; }
 
+  /// Is this tag type named, either directly or via being defined in
+  /// a typedef of this type?
+  ///
+  /// C++11 [basic.link]p8:
+  ///   A type is said to have linkage if and only if:
+  ///     - it is a class or enumeration type that is named (or has a
+  ///       name for linkage purposes) and the name has linkage; ...
+  /// C++11 [dcl.typedef]p9:
+  ///   If the typedef declaration defines an unnamed class (or enum),
+  ///   the first typedef-name declared by the declaration to be that
+  ///   class type (or enum type) is used to denote the class type (or
+  ///   enum type) for linkage purposes only.
+  ///
+  /// C does not have an analogous rule, but the same concept is
+  /// nonetheless useful in some places.
+  bool hasNameForLinkage() const {
+    return (getDeclName() || getTypedefNameForAnonDecl());
+  }
+
   TypedefNameDecl *getTypedefNameForAnonDecl() const {
     return hasExtInfo() ? 0 :
            TypedefNameDeclOrQualifier.get<TypedefNameDecl*>();
@@ -3347,8 +3299,8 @@ void Redeclarable<decl_type>::setPreviousDeclaration(decl_type *PrevDecl) {
 
   // First one will point to this one as latest.
   First->RedeclLink = LatestDeclLink(static_cast<decl_type*>(this));
-  if (NamedDecl *ND = dyn_cast<NamedDecl>(static_cast<decl_type*>(this)))
-    ND->ClearLinkageCache();
+  assert(!isa<NamedDecl>(static_cast<decl_type*>(this)) ||
+         cast<NamedDecl>(static_cast<decl_type*>(this))->isLinkageValid());
 }
 
 // Inline function definitions.

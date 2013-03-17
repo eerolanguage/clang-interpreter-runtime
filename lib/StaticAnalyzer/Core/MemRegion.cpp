@@ -195,6 +195,10 @@ DefinedOrUnknownSVal TypedValueRegion::getExtent(SValBuilder &svalBuilder) const
 }
 
 DefinedOrUnknownSVal FieldRegion::getExtent(SValBuilder &svalBuilder) const {
+  // Force callers to deal with bitfields explicitly.
+  if (getDecl()->isBitField())
+    return UnknownVal();
+
   DefinedOrUnknownSVal Extent = DeclRegion::getExtent(svalBuilder);
 
   // A zero-length array at the end of a struct often stands for dynamically-
@@ -1092,6 +1096,23 @@ RegionRawOffset ElementRegion::getAsArrayOffset() const {
   return RegionRawOffset(superR, offset);
 }
 
+
+/// Returns true if \p Base is an immediate base class of \p Child
+static bool isImmediateBase(const CXXRecordDecl *Child,
+                            const CXXRecordDecl *Base) {
+  // Note that we do NOT canonicalize the base class here, because
+  // ASTRecordLayout doesn't either. If that leads us down the wrong path,
+  // so be it; at least we won't crash.
+  for (CXXRecordDecl::base_class_const_iterator I = Child->bases_begin(),
+                                                E = Child->bases_end();
+       I != E; ++I) {
+    if (I->getType()->getAsCXXRecordDecl() == Base)
+      return true;
+  }
+
+  return false;
+}
+
 RegionOffset MemRegion::getAsOffset() const {
   const MemRegion *R = this;
   const MemRegion *SymbolicOffsetBase = 0;
@@ -1145,6 +1166,7 @@ RegionOffset MemRegion::getAsOffset() const {
       R = BOR->getSuperRegion();
 
       QualType Ty;
+      bool RootIsSymbolic = false;
       if (const TypedValueRegion *TVR = dyn_cast<TypedValueRegion>(R)) {
         Ty = TVR->getDesugaredValueType(getContext());
       } else if (const SymbolicRegion *SR = dyn_cast<SymbolicRegion>(R)) {
@@ -1152,12 +1174,26 @@ RegionOffset MemRegion::getAsOffset() const {
         // Pretend the type of the symbol is the true dynamic type.
         // (This will at least be self-consistent for the life of the symbol.)
         Ty = SR->getSymbol()->getType()->getPointeeType();
+        RootIsSymbolic = true;
       }
       
       const CXXRecordDecl *Child = Ty->getAsCXXRecordDecl();
       if (!Child) {
         // We cannot compute the offset of the base class.
         SymbolicOffsetBase = R;
+      }
+
+      if (RootIsSymbolic) {
+        // Base layers on symbolic regions may not be type-correct.
+        // Double-check the inheritance here, and revert to a symbolic offset
+        // if it's invalid (e.g. due to a reinterpret_cast).
+        if (BOR->isVirtual()) {
+          if (!Child->isVirtuallyDerivedFrom(BOR->getDecl()))
+            SymbolicOffsetBase = R;
+        } else {
+          if (!isImmediateBase(Child, BOR->getDecl()))
+            SymbolicOffsetBase = R;
+        }
       }
 
       // Don't bother calculating precise offsets if we already have a

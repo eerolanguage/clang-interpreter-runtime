@@ -34,6 +34,7 @@ enum TokenType {
   TT_ConditionalExpr,
   TT_CtorInitializerColon,
   TT_ImplicitStringLiteral,
+  TT_InlineASMColon,
   TT_InheritanceColon,
   TT_LineComment,
   TT_ObjCArrayLiteral,
@@ -75,10 +76,31 @@ public:
         ClosesTemplateDeclaration(false), MatchingParen(NULL),
         ParameterCount(0), BindingStrength(0), SplitPenalty(0),
         LongestObjCSelectorName(0), Parent(NULL), FakeLParens(0),
-        FakeRParens(0) {
+        FakeRParens(0), LastInChainOfCalls(false) {
   }
 
   bool is(tok::TokenKind Kind) const { return FormatTok.Tok.is(Kind); }
+
+  bool isOneOf(tok::TokenKind K1, tok::TokenKind K2) const {
+    return is(K1) || is(K2);
+  }
+
+  bool isOneOf(tok::TokenKind K1, tok::TokenKind K2, tok::TokenKind K3) const {
+    return is(K1) || is(K2) || is(K3);
+  }
+
+  bool isOneOf(
+      tok::TokenKind K1, tok::TokenKind K2, tok::TokenKind K3,
+      tok::TokenKind K4, tok::TokenKind K5 = tok::NUM_TOKENS,
+      tok::TokenKind K6 = tok::NUM_TOKENS, tok::TokenKind K7 = tok::NUM_TOKENS,
+      tok::TokenKind K8 = tok::NUM_TOKENS, tok::TokenKind K9 = tok::NUM_TOKENS,
+      tok::TokenKind K10 = tok::NUM_TOKENS,
+      tok::TokenKind K11 = tok::NUM_TOKENS,
+      tok::TokenKind K12 = tok::NUM_TOKENS) const {
+    return is(K1) || is(K2) || is(K3) || is(K4) || is(K5) || is(K6) || is(K7) ||
+           is(K8) || is(K9) || is(K10) || is(K11) || is(K12);
+  }
+
   bool isNot(tok::TokenKind Kind) const { return FormatTok.Tok.isNot(Kind); }
 
   bool isObjCAtKeyword(tok::ObjCKeywordKind Kind) const {
@@ -126,6 +148,9 @@ public:
   unsigned FakeLParens;
   /// \brief Insert this many fake ) after this token for correct indentation.
   unsigned FakeRParens;
+
+  /// \brief Is this the last "." or "->" in a builder-type call?
+  bool LastInChainOfCalls;
 
   const AnnotatedToken *getPreviousNoneComment() const {
     AnnotatedToken *Tok = Parent;

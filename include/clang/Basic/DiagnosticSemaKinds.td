@@ -666,6 +666,15 @@ def warn_auto_synthesizing_protocol_property :Warning<
   "auto property synthesis will not synthesize property"
   " declared in a protocol">,
   InGroup<DiagGroup<"objc-protocol-property-synthesis">>;
+def warn_no_autosynthesis_shared_ivar_property : Warning <
+  "auto property synthesis will not synthesize property "
+  "'%0' because it cannot share an ivar with another synthesized property">,
+  InGroup<ObjCNoPropertyAuthoSynthesis>;
+def warn_no_autosynthesis_property : Warning<
+  "auto property synthesis will not synthesize property "
+  "'%0' because it is 'readwrite' but it will be synthesized 'readonly' "
+  "via another property">,
+  InGroup<ObjCNoPropertyAuthoSynthesis>;
 def warn_autosynthesis_property_ivar_match :Warning<
   "autosynthesized property %0 will use %select{|synthesized}1 instance variable "
   "%2, not existing instance variable %3">,
@@ -1672,6 +1681,8 @@ def err_attribute_argument_outof_range : Error<
 def err_init_priority_object_attr : Error<
   "can only use 'init_priority' attribute on file-scope definitions "
   "of objects of class type">;
+def err_attribute_argument_vec_type_hint : Error<
+  "invalid attribute argument %0 - expecting a vector or vectorizable scalar type">;
 def err_attribute_argument_n_not_int : Error<
   "'%0' attribute requires parameter %1 to be an integer constant">;
 def err_attribute_argument_n_not_string : Error<
@@ -1729,6 +1740,8 @@ def err_as_qualified_auto_decl : Error<
   "automatic variable qualified with an address space">;
 def err_arg_with_address_space : Error<
   "parameter may not be qualified with an address space">;
+def err_field_with_address_space : Error<
+  "field may not be qualified with an address space">;
 def err_attr_objc_ownership_redundant : Error<
   "the type %0 is already explicitly ownership-qualified">;
 def err_attribute_not_string : Error<
@@ -2137,6 +2150,8 @@ def warn_attribute_protected_visibility :
   Warning<"target does not support 'protected' visibility; using 'default'">,
   InGroup<DiagGroup<"unsupported-visibility">>;
 def err_mismatched_visibility: Error<"visibility does not match previous declaration">;
+def warn_attribute_unknown_endian : Warning<"unknown endian '%0'">,
+  InGroup<IgnoredAttributes>;
 def note_previous_attribute : Note<"previous attribute is here">;
 def err_unknown_machine_mode : Error<"unknown machine mode %0">;
 def err_unsupported_machine_mode : Error<"unsupported machine mode %0">;
@@ -3124,9 +3139,9 @@ def warn_cxx98_compat_template_outside_of_template : Warning<
   InGroup<CXX98Compat>, DefaultIgnore;
 
 def err_non_type_template_in_nested_name_specifier : Error<
-  "qualified name refers into a specialization of function template '%0'">;
+  "qualified name refers into a specialization of function template %0">;
 def err_template_id_not_a_type : Error<
-  "template name refers to non-type template '%0'">;
+  "template name refers to non-type template %0">;
 def note_template_declared_here : Note<
   "%select{function template|class template|type alias template|template template parameter}0 "
   "%1 declared here">;
