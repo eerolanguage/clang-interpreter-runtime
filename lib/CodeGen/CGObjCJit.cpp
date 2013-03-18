@@ -184,10 +184,10 @@ public:
 
   virtual llvm::Function *ModuleInitFunction();
 
-  virtual llvm::Value *GetSelector(CGBuilderTy &Builder,
+  virtual llvm::Value *GetSelector(CodeGenFunction &CGF,
                                    Selector Sel, bool lval = false);
 
-  virtual llvm::Value *GetSelector(CGBuilderTy &Builder,
+  virtual llvm::Value *GetSelector(CodeGenFunction &CGF,
                                    const ObjCMethodDecl *Method);
 
   virtual llvm::Constant *GetEHType(QualType T);
@@ -221,7 +221,7 @@ public:
                            const CallArgList &CallArgs,
                            const ObjCMethodDecl *Method);
 
-  virtual llvm::Value *GenerateProtocolRef(CGBuilderTy &Builder,
+  virtual llvm::Value *GenerateProtocolRef(CodeGenFunction &CGF,
                                            const ObjCProtocolDecl *PD);
 
   virtual void GenerateProtocol(const ObjCProtocolDecl *OPD);
@@ -243,7 +243,7 @@ public:
 
   virtual llvm::Constant *GetCppAtomicObjectSetFunction();
 
-  virtual llvm::Value *GetClass(CGBuilderTy &Builder,
+  virtual llvm::Value *GetClass(CodeGenFunction &CGF,
                                 const ObjCInterfaceDecl *ID);
 
   virtual llvm::Constant *EnumerationMutationFunction();
@@ -448,7 +448,7 @@ llvm::Function *CGObjCJit::ModuleInitFunction() {
 }
 
 
-llvm::Value *CGObjCJit::GetSelector(CGBuilderTy &Builder,
+llvm::Value *CGObjCJit::GetSelector(CodeGenFunction &CGF,
                                     Selector Sel, bool /*lval*/) {
   if (isUsable) {
     void *sel = _sel_registerName(Sel.getAsString().c_str());
@@ -460,9 +460,9 @@ llvm::Value *CGObjCJit::GetSelector(CGBuilderTy &Builder,
 }
 
 
-llvm::Value *CGObjCJit::GetSelector(CGBuilderTy &Builder,
+llvm::Value *CGObjCJit::GetSelector(CodeGenFunction &CGF,
                                     const ObjCMethodDecl *Method) {
-  return GetSelector(Builder, Method->getSelector());
+  return GetSelector(CGF, Method->getSelector());
 }
 
 
@@ -621,12 +621,12 @@ CGObjCJit::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
   llvm::Value *ReceiverClass;
   if (IsClassMessage)
     if (isCategoryImpl) {
-      ReceiverClass = GetClass(CGF.Builder, Class);
+      ReceiverClass = GetClass(CGF, Class);
     } else {
       ReceiverClass = GetMetaClass(CGF.Builder, Class);
     }
   else {
-    ReceiverClass = GetClass(CGF.Builder, Class->getSuperClass());
+    ReceiverClass = GetClass(CGF, Class->getSuperClass());
   }
 
   return EmitMessageSend(CGF, Return, ResultType, Sel,
@@ -635,7 +635,7 @@ CGObjCJit::GenerateMessageSendSuper(CodeGen::CodeGenFunction &CGF,
 }
 
 
-llvm::Value *CGObjCJit::GenerateProtocolRef(CGBuilderTy &Builder,
+llvm::Value *CGObjCJit::GenerateProtocolRef(CodeGenFunction &CGF,
                                             const ObjCProtocolDecl *PD) {
   if (isUsable) {
     // If not locally defined, retrieve from runtime
@@ -648,8 +648,8 @@ llvm::Value *CGObjCJit::GenerateProtocolRef(CGBuilderTy &Builder,
     } else {
       llvm::Value *ProtocolName =
         CGM.GetAddrOfConstantCString(PD->getNameAsString());
-      ProtocolName = Builder.CreateStructGEP(ProtocolName, 0);
-      return Builder.CreateCall(fn_objc_getProtocol, ProtocolName);
+      ProtocolName = CGF.Builder.CreateStructGEP(ProtocolName, 0);
+      return CGF.Builder.CreateCall(fn_objc_getProtocol, ProtocolName);
     }
   }
   return 0;
@@ -737,13 +737,13 @@ llvm::Constant *CGObjCJit::GetSetStructFunction() {
 }
 
 
-llvm::Value *CGObjCJit::GetClass(CGBuilderTy &Builder,
+llvm::Value *CGObjCJit::GetClass(CodeGenFunction &CGF,
                                  const ObjCInterfaceDecl *ID) {
   if (isUsable) {
     llvm::Value *ClassName =
       CGM.GetAddrOfConstantCString(ID->getNameAsString());
-    ClassName = Builder.CreateStructGEP(ClassName, 0);
-    return Builder.CreateCall(fn_objc_getClass, ClassName);
+    ClassName = CGF.Builder.CreateStructGEP(ClassName, 0);
+    return CGF.Builder.CreateCall(fn_objc_getClass, ClassName);
   }
   return 0;
 }
@@ -1004,7 +1004,7 @@ CGObjCJit::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
                            const CallArgList &CallArgs,
                            const ObjCMethodDecl *Method) {
 
-  llvm::Value *Arg1 = GetSelector(CGF.Builder, Sel);
+  llvm::Value *Arg1 = GetSelector(CGF, Sel);
 
   CallArgList ActualArgs;
   ActualArgs.add(RValue::get(Arg0), CGF.getContext().getObjCIdType());
@@ -1036,18 +1036,8 @@ CGObjCJit::EmitMessageSend(CodeGen::CodeGenFunction &CGF,
                                      Arg1);
   }
 
-  llvm::Type *ReturnTy = CGM.getTypes().ConvertType(ResultType);
-
-  llvm::Type *ImpParams[] = { ObjCTypes.ObjectPtrTy,
-                              ObjCTypes.SelectorPtrTy };
-
-  llvm::Type *ImpTy = llvm::FunctionType::get(ReturnTy,
-                                              ImpParams,
-                                              true)->getPointerTo();
-  
-  llvm::Value *theImp = CGF.Builder.CreateBitCast(getImp, ImpTy);
-
   MessageSendInfo MSI = getMessageSendInfo(Method, ResultType, ActualArgs);
+  llvm::Value *theImp = CGF.Builder.CreateBitCast(getImp, MSI.MessengerType);
   return CGF.EmitCall(MSI.CallInfo, theImp, Return, ActualArgs);
 }
 
@@ -1058,6 +1048,7 @@ void CGObjCJit::AddMethodsToClass(void *theClass) {
   // are not available until then.
 
   CGBuilderTy Builder(JitInitBlock);
+  CodeGen::CodeGenFunction CGF(CGM);
 
   void *theMetaclass = _object_getClass(theClass);
 
@@ -1076,7 +1067,7 @@ void CGObjCJit::AddMethodsToClass(void *theClass) {
       llvm::Constant::getIntegerValue(ObjCTypes.ClassTy,
                                       llvm::APInt(sizeof(void*) * 8,
                                           (uint64_t)ClassObject));
-    llvm::Value *SelectorArg = GetSelector(Builder, D->getSelector());
+    llvm::Value *SelectorArg = GetSelector(CGF, D->getSelector());
     llvm::Value *TypeArg =
       llvm::Constant::getIntegerValue(ObjCTypes.Int8PtrTy,
                                       llvm::APInt(sizeof(void*) * 8,
