@@ -279,12 +279,16 @@ void strcpy_fn_const(char *x) {
   strcpy(x, (const char*)&strcpy_fn); // expected-warning{{Argument to string copy function is the address of the function 'strcpy_fn', which is not a null-terminated string}}
 }
 
+extern int globalInt;
 void strcpy_effects(char *x, char *y) {
   char a = x[0];
+  if (globalInt != 42)
+    return;
 
   clang_analyzer_eval(strcpy(x, y) == x); // expected-warning{{TRUE}}
   clang_analyzer_eval(strlen(x) == strlen(y)); // expected-warning{{TRUE}}
   clang_analyzer_eval(a == x[0]); // expected-warning{{UNKNOWN}}
+  clang_analyzer_eval(globalInt == 42); // expected-warning{{TRUE}}
 }
 
 void strcpy_overflow(char *y) {
@@ -1021,6 +1025,57 @@ void strncasecmp_diff_length_6() {
 
 void strncasecmp_embedded_null () {
 	clang_analyzer_eval(strncasecmp("ab\0zz", "ab\0yy", 4) == 0); // expected-warning{{TRUE}}
+}
+
+//===----------------------------------------------------------------------===
+// strsep()
+//===----------------------------------------------------------------------===
+
+char *strsep(char **stringp, const char *delim);
+
+void strsep_null_delim(char *s) {
+  strsep(&s, NULL); // expected-warning{{Null pointer argument in call to strsep()}}
+}
+
+void strsep_null_search() {
+  strsep(NULL, ""); // expected-warning{{Null pointer argument in call to strsep()}}
+}
+
+void strsep_return_original_pointer(char *s) {
+  char *original = s;
+  char *result = strsep(&s, ""); // no-warning
+  clang_analyzer_eval(original == result); // expected-warning{{TRUE}}
+}
+
+void strsep_null_string() {
+  char *s = NULL;
+  char *result = strsep(&s, ""); // no-warning
+  clang_analyzer_eval(result == NULL); // expected-warning{{TRUE}}
+}
+
+void strsep_changes_input_pointer(char *s) {
+  char *original = s;
+  strsep(&s, ""); // no-warning
+  clang_analyzer_eval(s == original); // expected-warning{{UNKNOWN}}
+  clang_analyzer_eval(s == NULL); // expected-warning{{UNKNOWN}}
+
+  // Check that the value is symbolic.
+  if (s == NULL) {
+    clang_analyzer_eval(s == NULL); // expected-warning{{TRUE}}
+  }
+}
+
+void strsep_changes_input_string() {
+  char str[] = "abc";
+
+  clang_analyzer_eval(str[1] == 'b'); // expected-warning{{TRUE}}
+
+  char *s = str;
+  strsep(&s, "b"); // no-warning
+
+  // The real strsep will change the first delimiter it finds into a NUL
+  // character. For now, we just model the invalidation.
+  clang_analyzer_eval(str[1] == 'b'); // expected-warning{{UNKNOWN}}
 }
 
 //===----------------------------------------------------------------------===

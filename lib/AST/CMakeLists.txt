@@ -7,6 +7,7 @@ add_clang_library(clangAST
   ASTDiagnostic.cpp
   ASTDumper.cpp
   ASTImporter.cpp
+  ASTTypeTraits.cpp
   AttrImpl.cpp
   CXXInheritance.cpp
   Comment.cpp
@@ -22,6 +23,7 @@ add_clang_library(clangAST
   DeclFriend.cpp
   DeclGroup.cpp
   DeclObjC.cpp
+  DeclOpenMP.cpp
   DeclPrinter.cpp
   DeclTemplate.cpp
   DumpXML.cpp
@@ -33,8 +35,8 @@ add_clang_library(clangAST
   InheritViz.cpp
   ItaniumCXXABI.cpp
   ItaniumMangle.cpp
-  LambdaMangleContext.cpp
   Mangle.cpp
+  MangleNumberingContext.cpp
   MicrosoftCXXABI.cpp
   MicrosoftMangle.cpp
   NestedNameSpecifier.cpp

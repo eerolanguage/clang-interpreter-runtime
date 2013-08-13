@@ -7,22 +7,26 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "clang/Driver/ToolChain.h"
+#include "Tools.h"
 #include "clang/Basic/ObjCRuntime.h"
 #include "clang/Driver/Action.h"
-#include "clang/Driver/Arg.h"
-#include "clang/Driver/ArgList.h"
 #include "clang/Driver/Driver.h"
 #include "clang/Driver/DriverDiagnostic.h"
-#include "clang/Driver/Option.h"
 #include "clang/Driver/Options.h"
+#include "clang/Driver/ToolChain.h"
 #include "llvm/ADT/StringSwitch.h"
+#include "llvm/Option/Arg.h"
+#include "llvm/Option/ArgList.h"
+#include "llvm/Option/Option.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/FileSystem.h"
 using namespace clang::driver;
 using namespace clang;
+using namespace llvm::opt;
 
-ToolChain::ToolChain(const Driver &D, const llvm::Triple &T)
-  : D(D), Triple(T) {
+ToolChain::ToolChain(const Driver &D, const llvm::Triple &T,
+                     const ArgList &A)
+  : D(D), Triple(T), Args(A) {
 }
 
 ToolChain::~ToolChain() {
@@ -30,6 +34,12 @@ ToolChain::~ToolChain() {
 
 const Driver &ToolChain::getDriver() const {
  return D;
+}
+
+bool ToolChain::useIntegratedAs() const {
+  return Args.hasFlag(options::OPT_integrated_as,
+                      options::OPT_no_integrated_as,
+                      IsIntegratedAssemblerDefault());
 }
 
 std::string ToolChain::getDefaultUniversalArchName() const {
@@ -42,6 +52,8 @@ std::string ToolChain::getDefaultUniversalArchName() const {
     return "ppc";
   case llvm::Triple::ppc64:
     return "ppc64";
+  case llvm::Triple::ppc64le:
+    return "ppc64le";
   default:
     return Triple.getArchName();
   }
@@ -49,6 +61,73 @@ std::string ToolChain::getDefaultUniversalArchName() const {
 
 bool ToolChain::IsUnwindTablesDefault() const {
   return false;
+}
+
+Tool *ToolChain::getClang() const {
+  if (!Clang)
+    Clang.reset(new tools::Clang(*this));
+  return Clang.get();
+}
+
+Tool *ToolChain::buildAssembler() const {
+  return new tools::ClangAs(*this);
+}
+
+Tool *ToolChain::buildLinker() const {
+  llvm_unreachable("Linking is not supported by this toolchain");
+}
+
+Tool *ToolChain::getAssemble() const {
+  if (!Assemble)
+    Assemble.reset(buildAssembler());
+  return Assemble.get();
+}
+
+Tool *ToolChain::getClangAs() const {
+  if (!Assemble)
+    Assemble.reset(new tools::ClangAs(*this));
+  return Assemble.get();
+}
+
+Tool *ToolChain::getLink() const {
+  if (!Link)
+    Link.reset(buildLinker());
+  return Link.get();
+}
+
+Tool *ToolChain::getTool(Action::ActionClass AC) const {
+  switch (AC) {
+  case Action::AssembleJobClass:
+    return getAssemble();
+
+  case Action::LinkJobClass:
+    return getLink();
+
+  case Action::InputClass:
+  case Action::BindArchClass:
+  case Action::LipoJobClass:
+  case Action::DsymutilJobClass:
+  case Action::VerifyJobClass:
+    llvm_unreachable("Invalid tool kind.");
+
+  case Action::CompileJobClass:
+  case Action::PrecompileJobClass:
+  case Action::PreprocessJobClass:
+  case Action::AnalyzeJobClass:
+  case Action::MigrateJobClass:
+    return getClang();
+  }
+
+  llvm_unreachable("Invalid tool kind.");
+}
+
+Tool *ToolChain::SelectTool(const JobAction &JA) const {
+  if (getDriver().ShouldUseClangCompiler(JA))
+    return getClang();
+  Action::ActionClass AC = JA.getKind();
+  if (AC == Action::AssembleJobClass && useIntegratedAs())
+    return getClangAs();
+  return getTool(AC);
 }
 
 std::string ToolChain::GetFilePath(const char *Name) const {
@@ -101,7 +180,8 @@ static const char *getARMTargetCPU(const ArgList &Args,
     .Cases("armv2", "armv2a","arm2")
     .Case("armv3", "arm6")
     .Case("armv3m", "arm7m")
-    .Cases("armv4", "armv4t", "arm7tdmi")
+    .Case("armv4", "strongarm")
+    .Case("armv4t", "arm7tdmi")
     .Cases("armv5", "armv5t", "arm10tdmi")
     .Cases("armv5e", "armv5te", "arm1026ejs")
     .Case("armv5tej", "arm926ej-s")
@@ -117,10 +197,12 @@ static const char *getARMTargetCPU(const ArgList &Args,
     .Cases("armv7r", "armv7-r", "cortex-r4")
     .Cases("armv7m", "armv7-m", "cortex-m3")
     .Cases("armv7em", "armv7e-m", "cortex-m4")
+    .Cases("armv8", "armv8a", "armv8-a", "cortex-a53")
     .Case("ep9312", "ep9312")
     .Case("iwmmxt", "iwmmxt")
     .Case("xscale", "xscale")
-    // If all else failed, return the most base CPU LLVM supports.
+    // If all else failed, return the most base CPU with thumb interworking
+    // supported by LLVM.
     .Default("arm7tdmi");
 }
 
@@ -131,6 +213,7 @@ static const char *getARMTargetCPU(const ArgList &Args,
 // FIXME: tblgen this, or kill it!
 static const char *getLLVMArchSuffixForARM(StringRef CPU) {
   return llvm::StringSwitch<const char *>(CPU)
+    .Case("strongarm", "v4")
     .Cases("arm7tdmi", "arm7tdmi-s", "arm710t", "v4t")
     .Cases("arm720t", "arm9", "arm9tdmi", "v4t")
     .Cases("arm920", "arm920t", "arm922t", "v4t")
@@ -150,6 +233,7 @@ static const char *getLLVMArchSuffixForARM(StringRef CPU) {
     .Case("cortex-m4", "v7em")
     .Case("cortex-a9-mp", "v7f")
     .Case("swift", "v7s")
+    .Case("cortex-a53", "v8")
     .Default("");
 }
 
@@ -256,6 +340,13 @@ ToolChain::CXXStdlibType ToolChain::GetCXXStdlibType(const ArgList &Args) const{
                                                    const Twine &Path) {
   CC1Args.push_back("-internal-externc-isystem");
   CC1Args.push_back(DriverArgs.MakeArgString(Path));
+}
+
+void ToolChain::addExternCSystemIncludeIfExists(const ArgList &DriverArgs,
+                                                ArgStringList &CC1Args,
+                                                const Twine &Path) {
+  if (llvm::sys::fs::exists(Path))
+    addExternCSystemInclude(DriverArgs, CC1Args, Path);
 }
 
 /// \brief Utility function to add a list of system include directories to CC1.

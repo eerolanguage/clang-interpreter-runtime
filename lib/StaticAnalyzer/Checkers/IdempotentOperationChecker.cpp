@@ -423,12 +423,12 @@ void IdempotentOperationChecker::checkEndAnalysis(ExplodedGraph &G,
       if (LHSRelevant) {
         const Expr *LHS = i->first->getLHS();
         report->addRange(LHS->getSourceRange());
-        FindLastStoreBRVisitor::registerStatementVarDecls(*report, LHS);
+        FindLastStoreBRVisitor::registerStatementVarDecls(*report, LHS, false);
       }
       if (RHSRelevant) {
         const Expr *RHS = i->first->getRHS();
         report->addRange(i->first->getRHS()->getSourceRange());
-        FindLastStoreBRVisitor::registerStatementVarDecls(*report, RHS);
+        FindLastStoreBRVisitor::registerStatementVarDecls(*report, RHS, false);
       }
 
       BR.emitReport(report);
@@ -678,19 +678,8 @@ bool IdempotentOperationChecker::CanVary(const Expr *Ex,
     return CanVary(B->getRHS(), AC)
         || CanVary(B->getLHS(), AC);
    }
-  case Stmt::UnaryOperatorClass: {
-    const UnaryOperator *U = cast<const UnaryOperator>(Ex);
-    // Handle trivial case first
-    switch (U->getOpcode()) {
-    case UO_Extension:
-      return false;
-    default:
-      return CanVary(U->getSubExpr(), AC);
-    }
-  }
-  case Stmt::ChooseExprClass:
-    return CanVary(cast<const ChooseExpr>(Ex)->getChosenSubExpr(
-        AC->getASTContext()), AC);
+  case Stmt::UnaryOperatorClass:
+    return CanVary(cast<UnaryOperator>(Ex)->getSubExpr(), AC);
   case Stmt::ConditionalOperatorClass:
   case Stmt::BinaryConditionalOperatorClass:
     return CanVary(cast<AbstractConditionalOperator>(Ex)->getCond(), AC);

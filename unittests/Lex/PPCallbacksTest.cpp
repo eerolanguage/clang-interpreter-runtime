@@ -19,7 +19,7 @@
 #include "clang/Lex/ModuleLoader.h"
 #include "clang/Lex/PreprocessorOptions.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/Support/PathV2.h"
+#include "llvm/Support/Path.h"
 #include "gtest/gtest.h"
 
 using namespace llvm;
@@ -39,7 +39,8 @@ class VoidModuleLoader : public ModuleLoader {
 
   virtual void makeModuleVisible(Module *Mod,
                                  Module::NameVisibilityKind Visibility,
-                                 SourceLocation ImportLoc) { }
+                                 SourceLocation ImportLoc,
+                                 bool Complain) { }
 };
 
 // Stub to collect data from InclusionDirective callbacks.

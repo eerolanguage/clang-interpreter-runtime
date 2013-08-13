@@ -80,3 +80,80 @@ __attribute ((objc_requires_property_definitions)) // expected-error {{objc_requ
 }
 
 @end
+
+// More test where such warnings should not be issued.
+@protocol MyProtocol
+-(void)setProp1:(id)x;
+@end
+
+@protocol P1 <MyProtocol>
+@end
+
+@interface B
+@property (readonly) id prop;
+@property (readonly) id prop1;
+@property (readonly) id prop2;
+@end
+
+@interface B()
+-(void)setProp:(id)x;
+@end
+
+@interface B(cat)
+@property (readwrite) id prop2;
+@end
+
+@interface S : B<P1>
+@property (assign,readwrite) id prop;
+@property (assign,readwrite) id prop1;
+@property (assign,readwrite) id prop2;
+@end
+
+@implementation S
+@end
+
+// rdar://14085456
+// No warning must be issued in this test.
+@interface ParentObject
+@end
+
+@protocol TestObject 
+@property (readonly) int six;
+@end
+
+@interface TestObject : ParentObject <TestObject>
+@property int six;
+@end
+
+@implementation TestObject
+@synthesize six;
+@end
+
+// rdar://14094682
+// no warning in this test
+@interface ISAChallenge : NSObject {
+}
+
+@property (assign, readonly) int failureCount;
+@end
+
+@interface ISSAChallenge : ISAChallenge {
+    int _failureCount;
+}
+@property (assign, readwrite) int failureCount;
+@end
+
+@implementation ISAChallenge
+- (int)failureCount {
+    return 0;
+}
+@end
+
+@implementation ISSAChallenge
+
+@synthesize failureCount = _failureCount;
+@end
+
+__attribute ((objc_requires_property_definitions(1))) // expected-error {{'objc_requires_property_definitions' attribute takes no arguments}}
+@interface I1
+@end

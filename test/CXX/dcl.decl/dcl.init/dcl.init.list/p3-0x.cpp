@@ -4,7 +4,7 @@ namespace std {
   typedef decltype(sizeof(int)) size_t;
 
   template <typename E>
-  struct initializer_list
+  struct initializer_list // expected-note 2{{candidate}}
   {
     const E *p;
     size_t n;
@@ -109,4 +109,18 @@ namespace bullet8 {
 
   int j { 1 };
   int k { };
+}
+
+namespace rdar13395022 {
+  struct MoveOnly {
+    MoveOnly(MoveOnly&&);
+  };
+
+  void test(MoveOnly mo) {
+    // FIXME: These diagnostics are poor.
+    auto &&list1 = {mo}; // expected-error{{no viable conversion}}
+    MoveOnly (&&list2)[1] = {mo}; // expected-error{{no viable conversion}}
+    std::initializer_list<MoveOnly> &&list3 = {};
+    MoveOnly (&&list4)[1] = {}; // expected-error{{uninitialized}}
+  }
 }

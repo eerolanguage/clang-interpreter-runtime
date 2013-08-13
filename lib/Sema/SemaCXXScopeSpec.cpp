@@ -78,8 +78,7 @@ DeclContext *Sema::computeDeclContext(const CXXScopeSpec &SS,
   if (!SS.isSet() || SS.isInvalid())
     return 0;
 
-  NestedNameSpecifier *NNS
-    = static_cast<NestedNameSpecifier *>(SS.getScopeRep());
+  NestedNameSpecifier *NNS = SS.getScopeRep();
   if (NNS->isDependent()) {
     // If this nested-name-specifier refers to the current
     // instantiation, return its DeclContext.
@@ -158,21 +157,7 @@ bool Sema::isDependentScopeSpecifier(const CXXScopeSpec &SS) {
   if (!SS.isSet() || SS.isInvalid())
     return false;
 
-  NestedNameSpecifier *NNS
-    = static_cast<NestedNameSpecifier *>(SS.getScopeRep());
-  return NNS->isDependent();
-}
-
-// \brief Determine whether this C++ scope specifier refers to an
-// unknown specialization, i.e., a dependent type that is not the
-// current instantiation.
-bool Sema::isUnknownSpecialization(const CXXScopeSpec &SS) {
-  if (!isDependentScopeSpecifier(SS))
-    return false;
-
-  NestedNameSpecifier *NNS
-    = static_cast<NestedNameSpecifier *>(SS.getScopeRep());
-  return getCurrentInstantiationOf(NNS) == 0;
+  return SS.getScopeRep()->isDependent();
 }
 
 /// \brief If the given nested name specifier refers to the current
@@ -511,16 +496,20 @@ bool Sema::BuildCXXNestedNameSpecifier(Scope *S,
                                  LookupCtx, EnteringContext))) {
       std::string CorrectedStr(Corrected.getAsString(getLangOpts()));
       std::string CorrectedQuotedStr(Corrected.getQuoted(getLangOpts()));
+      bool droppedSpecifier = Corrected.WillReplaceSpecifier() &&
+                              Name.getAsString() == CorrectedStr;
       if (LookupCtx)
         Diag(Found.getNameLoc(), diag::err_no_member_suggest)
-          << Name << LookupCtx << CorrectedQuotedStr << SS.getRange()
+          << Name << LookupCtx << droppedSpecifier << CorrectedQuotedStr
+          << SS.getRange()
           << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
                                           CorrectedStr);
       else
         Diag(Found.getNameLoc(), diag::err_undeclared_var_use_suggest)
           << Name << CorrectedQuotedStr
-          << FixItHint::CreateReplacement(Found.getNameLoc(), CorrectedStr);
-      
+          << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
+                                          CorrectedStr);
+
       if (NamedDecl *ND = Corrected.getCorrectionDecl()) {
         Diag(ND->getLocation(), diag::note_previous_decl) << CorrectedQuotedStr;
         Found.addDecl(ND);
@@ -769,8 +758,7 @@ bool Sema::ActOnCXXNestedNameSpecifier(Scope *S,
   if (DependentTemplateName *DTN = Template.get().getAsDependentTemplateName()){
     // Handle a dependent template specialization for which we cannot resolve
     // the template name.
-    assert(DTN->getQualifier()
-             == static_cast<NestedNameSpecifier*>(SS.getScopeRep()));
+    assert(DTN->getQualifier() == SS.getScopeRep());
     QualType T = Context.getDependentTemplateSpecializationType(ETK_None,
                                                           DTN->getQualifier(),
                                                           DTN->getIdentifier(),
@@ -877,8 +865,7 @@ void Sema::RestoreNestedNameSpecifierAnnotation(void *AnnotationPtr,
 bool Sema::ShouldEnterDeclaratorScope(Scope *S, const CXXScopeSpec &SS) {
   assert(SS.isSet() && "Parser passed invalid CXXScopeSpec.");
 
-  NestedNameSpecifier *Qualifier =
-    static_cast<NestedNameSpecifier*>(SS.getScopeRep());
+  NestedNameSpecifier *Qualifier = SS.getScopeRep();
 
   // There are only two places a well-formed program may qualify a
   // declarator: first, when defining a namespace or class member

@@ -269,7 +269,7 @@ public:
   Stmt &operator*() { return *getStmt(); }
   const Stmt &operator*() const { return *getStmt(); }
 
-  operator bool() const { return getStmt(); }
+  LLVM_EXPLICIT operator bool() const { return getStmt(); }
 };
 
 /// CFGBlock - Represents a single basic block in a source-level CFG.
@@ -601,6 +601,7 @@ public:
     bool AddInitializers;
     bool AddImplicitDtors;
     bool AddTemporaryDtors;
+    bool AddStaticInitBranches;
 
     bool alwaysAdd(const Stmt *stmt) const {
       return alwaysAddMask[stmt->getStmtClass()];
@@ -621,7 +622,8 @@ public:
       ,AddEHEdges(false)
       ,AddInitializers(false)
       ,AddImplicitDtors(false)
-      ,AddTemporaryDtors(false) {}
+      ,AddTemporaryDtors(false)
+      ,AddStaticInitBranches(false) {}
   };
 
   /// \brief Provides a custom implementation of the iterator class to have the
@@ -743,6 +745,35 @@ public:
     TryDispatchBlocks.push_back(block);
   }
 
+  /// Records a synthetic DeclStmt and the DeclStmt it was constructed from.
+  ///
+  /// The CFG uses synthetic DeclStmts when a single AST DeclStmt contains
+  /// multiple decls.
+  void addSyntheticDeclStmt(const DeclStmt *Synthetic,
+                            const DeclStmt *Source) {
+    assert(Synthetic->isSingleDecl() && "Can handle single declarations only");
+    assert(Synthetic != Source && "Don't include original DeclStmts in map");
+    assert(!SyntheticDeclStmts.count(Synthetic) && "Already in map");
+    SyntheticDeclStmts[Synthetic] = Source;
+  }
+
+  typedef llvm::DenseMap<const DeclStmt *, const DeclStmt *>::const_iterator
+    synthetic_stmt_iterator;
+
+  /// Iterates over synthetic DeclStmts in the CFG.
+  ///
+  /// Each element is a (synthetic statement, source statement) pair.
+  ///
+  /// \sa addSyntheticDeclStmt
+  synthetic_stmt_iterator synthetic_stmt_begin() const {
+    return SyntheticDeclStmts.begin();
+  }
+
+  /// \sa synthetic_stmt_begin
+  synthetic_stmt_iterator synthetic_stmt_end() const {
+    return SyntheticDeclStmts.end();
+  }
+
   //===--------------------------------------------------------------------===//
   // Member templates useful for various batch operations over CFGs.
   //===--------------------------------------------------------------------===//
@@ -760,21 +791,6 @@ public:
   //===--------------------------------------------------------------------===//
   // CFG Introspection.
   //===--------------------------------------------------------------------===//
-
-  struct   BlkExprNumTy {
-    const signed Idx;
-    explicit BlkExprNumTy(signed idx) : Idx(idx) {}
-    explicit BlkExprNumTy() : Idx(-1) {}
-    operator bool() const { return Idx >= 0; }
-    operator unsigned() const { assert(Idx >=0); return (unsigned) Idx; }
-  };
-
-  bool isBlkExpr(const Stmt *S) { return getBlkExprNum(S); }
-  bool isBlkExpr(const Stmt *S) const {
-    return const_cast<CFG*>(this)->isBlkExpr(S);
-  }
-  BlkExprNumTy  getBlkExprNum(const Stmt *S);
-  unsigned      getNumBlkExprs();
 
   /// getNumBlockIDs - Returns the total number of BlockIDs allocated (which
   /// start at 0).
@@ -798,9 +814,7 @@ public:
   //===--------------------------------------------------------------------===//
 
   CFG() : Entry(NULL), Exit(NULL), IndirectGotoBlock(NULL), NumBlockIDs(0),
-          BlkExprMap(NULL), Blocks(BlkBVC, 10) {}
-
-  ~CFG();
+          Blocks(BlkBVC, 10) {}
 
   llvm::BumpPtrAllocator& getAllocator() {
     return BlkBVC.getAllocator();
@@ -817,11 +831,6 @@ private:
                                 // for indirect gotos
   unsigned  NumBlockIDs;
 
-  // BlkExprMap - An opaque pointer to prevent inclusion of DenseMap.h.
-  //  It represents a map from Expr* to integers to record the set of
-  //  block-level expressions and their "statement number" in the CFG.
-  void *    BlkExprMap;
-
   BumpVectorContext BlkBVC;
 
   CFGBlockListTy Blocks;
@@ -830,6 +839,9 @@ private:
   /// This is the collection of such blocks present in the CFG.
   std::vector<const CFGBlock *> TryDispatchBlocks;
 
+  /// Collects DeclStmts synthesized for this CFG and maps each one back to its
+  /// source DeclStmt.
+  llvm::DenseMap<const DeclStmt *, const DeclStmt *> SyntheticDeclStmts;
 };
 } // end namespace clang
 
@@ -841,17 +853,10 @@ namespace llvm {
 
 /// Implement simplify_type for CFGTerminator, so that we can dyn_cast from
 /// CFGTerminator to a specific Stmt class.
-template <> struct simplify_type<const ::clang::CFGTerminator> {
-  typedef const ::clang::Stmt *SimpleType;
-  static SimpleType getSimplifiedValue(const ::clang::CFGTerminator &Val) {
-    return Val.getStmt();
-  }
-};
-
 template <> struct simplify_type< ::clang::CFGTerminator> {
   typedef ::clang::Stmt *SimpleType;
-  static SimpleType getSimplifiedValue(const ::clang::CFGTerminator &Val) {
-    return const_cast<SimpleType>(Val.getStmt());
+  static SimpleType getSimplifiedValue(::clang::CFGTerminator Val) {
+    return Val.getStmt();
   }
 };
 

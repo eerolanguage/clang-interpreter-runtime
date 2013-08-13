@@ -18,6 +18,10 @@
 #include <cstdlib>
 #include <cstring>
 
+#ifdef HAVE_SVN_VERSION_INC
+#  include "SVNVersion.inc"
+#endif
+
 namespace clang {
 
 std::string getClangRepositoryPath() {
@@ -32,7 +36,7 @@ std::string getClangRepositoryPath() {
 
   // If the SVN_REPOSITORY is empty, try to use the SVN keyword. This helps us
   // pick up a tag in an SVN export, for example.
-  static StringRef SVNRepository("$URL$");
+  StringRef SVNRepository("$URL$");
   if (URL.empty()) {
     URL = SVNRepository.slice(SVNRepository.find(':'),
                               SVNRepository.find("/lib/Basic"));

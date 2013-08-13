@@ -23,6 +23,17 @@ struct Bar {
 }
 }
 
+template <typename T>
+T tbar(int);
+
+template <typename T>
+T tbar(int[5]);
+
+template <typename T, int size>
+T tbar(int[size]);
+
+void foo(int i, int incomplete_array[]) { int variable_array[i]; }
+
 // RUN: c-index-test -test-print-type %s | FileCheck %s
 // CHECK: Namespace=outer:1:11 (Definition) [type=] [typekind=Invalid] [isPOD=0]
 // CHECK: ClassTemplate=Foo:4:8 (Definition) [type=] [typekind=Invalid] [isPOD=0]
@@ -54,3 +65,11 @@ struct Bar {
 // CHECK: DeclRefExpr=z:15:35 [type=FooType] [typekind=Typedef] [canonicaltype=int] [canonicaltypekind=Int] [isPOD=1]
 // CHECK: TypedefDecl=OtherType:19:18 (Definition) [type=OtherType] [typekind=Typedef] [canonicaltype=double] [canonicaltypekind=Double] [isPOD=1]
 // CHECK: TypedefDecl=ArrayType:20:15 (Definition) [type=ArrayType] [typekind=Typedef] [canonicaltype=int [5]] [canonicaltypekind=ConstantArray] [isPOD=1]
+// CHECK: FunctionTemplate=tbar:27:3 [type=T (int)] [typekind=FunctionProto] [canonicaltype=type-parameter-0-0 (int)] [canonicaltypekind=FunctionProto] [resulttype=T] [resulttypekind=Unexposed] [isPOD=0]
+// CHECK: TemplateTypeParameter=T:26:20 (Definition) [type=T] [typekind=Unexposed] [canonicaltype=type-parameter-0-0] [canonicaltypekind=Unexposed] [isPOD=0]
+// CHECK: FunctionTemplate=tbar:30:3 [type=T (int *)] [typekind=FunctionProto] [canonicaltype=type-parameter-0-0 (int *)] [canonicaltypekind=FunctionProto] [resulttype=T] [resulttypekind=Unexposed] [isPOD=0]
+// CHECK: ParmDecl=:30:11 (Definition) [type=int [5]] [typekind=ConstantArray] [isPOD=1]
+// CHECK: FunctionTemplate=tbar:33:3 [type=T (int *)] [typekind=FunctionProto] [canonicaltype=type-parameter-0-0 (int *)] [canonicaltypekind=FunctionProto] [resulttype=T] [resulttypekind=Unexposed] [isPOD=0]
+// CHECK: ParmDecl=:33:11 (Definition) [type=int [size]] [typekind=DependentSizedArray] [isPOD=0]
+// CHECK: ParmDecl=incomplete_array:35:21 (Definition) [type=int []] [typekind=IncompleteArray] [isPOD=1]
+// CHECK: VarDecl=variable_array:35:47 (Definition) [type=int [i]] [typekind=VariableArray] [isPOD=1]

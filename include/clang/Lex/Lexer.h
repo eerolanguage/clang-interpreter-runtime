@@ -202,7 +202,10 @@ public:
   /// lexer has nothing to reset to.
   void resetExtendedTokenMode();
 
-  const char *getBufferStart() const { return BufferStart; }
+  /// Gets source code buffer.
+  StringRef getBuffer() const {
+    return StringRef(BufferStart, BufferEnd - BufferStart);
+  }
 
   /// ReadToEndOfLine - Read the rest of the current preprocessor line as an
   /// uninterpreted string.  This switches the lexer out of directive mode.
@@ -268,10 +271,10 @@ public:
   /// location and does not jump to the expansion or spelling
   /// location.
   static StringRef getSpelling(SourceLocation loc,
-                                     SmallVectorImpl<char> &buffer,
-                                     const SourceManager &SourceMgr,
-                                     const LangOptions &LangOpts,
-                                     bool *invalid = 0);
+                               SmallVectorImpl<char> &buffer,
+                               const SourceManager &SourceMgr,
+                               const LangOptions &LangOpts,
+                               bool *invalid = 0);
   
   /// MeasureTokenLength - Relex the token at the specified location and return
   /// its length in bytes in the input file.  If the token needs cleaning (e.g.
@@ -566,8 +569,9 @@ private:
 
   void SkipBytes(unsigned Bytes, bool StartOfLine);
 
-  const char *LexUDSuffix(Token &Result, const char *CurPtr);
-  
+  const char *LexUDSuffix(Token &Result, const char *CurPtr,
+                          bool IsStringLiteral);
+
   // Helper functions to lex the remainder of a token of the specific type.
   void LexIdentifier         (Token &Result, const char *CurPtr);
   void LexNumericConstant    (Token &Result, const char *CurPtr);

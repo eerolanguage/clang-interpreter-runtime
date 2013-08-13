@@ -206,6 +206,11 @@ static void addThreadSanitizerPass(const PassManagerBuilder &Builder,
   PM.add(createThreadSanitizerPass(CGOpts.SanitizerBlacklistFile));
 }
 
+static void addDataFlowSanitizerPass(const PassManagerBuilder &Builder,
+                                     PassManagerBase &PM) {
+  PM.add(createDataFlowSanitizerPass());
+}
+
 void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
   unsigned OptLevel = CodeGenOpts.OptimizationLevel;
   CodeGenOptions::InliningMethod Inlining = CodeGenOpts.getInlining();
@@ -220,8 +225,10 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
   PassManagerBuilderWrapper PMBuilder(CodeGenOpts, LangOpts);
   PMBuilder.OptLevel = OptLevel;
   PMBuilder.SizeLevel = CodeGenOpts.OptimizeSize;
+  PMBuilder.BBVectorize = CodeGenOpts.VectorizeBB;
+  PMBuilder.SLPVectorize = CodeGenOpts.VectorizeSLP;
+  PMBuilder.LoopVectorize = CodeGenOpts.VectorizeLoop;
 
-  PMBuilder.DisableSimplifyLibCalls = !CodeGenOpts.SimplifyLibCalls;
   PMBuilder.DisableUnitAtATime = !CodeGenOpts.UnitAtATime;
   PMBuilder.DisableUnrollLoops = !CodeGenOpts.UnrollLoops;
 
@@ -263,6 +270,13 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
                            addThreadSanitizerPass);
   }
 
+  if (LangOpts.Sanitize.DataFlow) {
+    PMBuilder.addExtension(PassManagerBuilder::EP_OptimizerLast,
+                           addDataFlowSanitizerPass);
+    PMBuilder.addExtension(PassManagerBuilder::EP_EnabledOnOptLevel0,
+                           addDataFlowSanitizerPass);
+  }
+
   // Figure out TargetLibraryInfo.
   Triple TargetTriple(TheModule->getTargetTriple());
   PMBuilder.LibraryInfo = new TargetLibraryInfo(TargetTriple);
@@ -302,7 +316,8 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
   // Set up the per-module pass manager.
   PassManager *MPM = getPerModulePasses(TM);
 
-  if (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes) {
+  if (!CodeGenOpts.DisableGCov &&
+      (CodeGenOpts.EmitGcovArcs || CodeGenOpts.EmitGcovNotes)) {
     // Not using 'GCOVOptions::getDefault' allows us to avoid exiting if
     // LLVM's -default-gcov-version flag is set to something invalid.
     GCOVOptions Options;
@@ -311,9 +326,8 @@ void EmitAssemblyHelper::CreatePasses(TargetMachine *TM) {
     memcpy(Options.Version, CodeGenOpts.CoverageVersion, 4);
     Options.UseCfgChecksum = CodeGenOpts.CoverageExtraChecksum;
     Options.NoRedZone = CodeGenOpts.DisableRedZone;
-    // FIXME: the clang flag name is backwards.
     Options.FunctionNamesInData =
-        !CodeGenOpts.CoverageFunctionNamesInData;
+        !CodeGenOpts.CoverageNoFunctionNamesInData;
     MPM->add(createGCOVProfilerPass(Options));
     if (CodeGenOpts.getDebugInfo() == CodeGenOptions::NoDebugInfo)
       MPM->add(createStripSymbolsPass(true));
@@ -410,13 +424,10 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
   // Set frame pointer elimination mode.
   if (!CodeGenOpts.DisableFPElim) {
     Options.NoFramePointerElim = false;
-    Options.NoFramePointerElimNonLeaf = false;
   } else if (CodeGenOpts.OmitLeafFramePointer) {
     Options.NoFramePointerElim = false;
-    Options.NoFramePointerElimNonLeaf = true;
   } else {
     Options.NoFramePointerElim = true;
-    Options.NoFramePointerElimNonLeaf = true;
   }
 
   if (CodeGenOpts.UseInitArray)
@@ -452,11 +463,10 @@ TargetMachine *EmitAssemblyHelper::CreateTargetMachine(bool MustCreateTM) {
   Options.UnsafeFPMath = CodeGenOpts.UnsafeFPMath;
   Options.UseSoftFloat = CodeGenOpts.SoftFloat;
   Options.StackAlignmentOverride = CodeGenOpts.StackAlignment;
-  Options.RealignStack = CodeGenOpts.StackRealignment;
   Options.DisableTailCalls = CodeGenOpts.DisableTailCalls;
   Options.TrapFuncName = CodeGenOpts.TrapFuncName;
   Options.PositionIndependentExecutable = LangOpts.PIELevel != 0;
-  Options.SSPBufferSize = CodeGenOpts.SSPBufferSize;
+  Options.EnableSegmentedStacks = CodeGenOpts.EnableSegmentedStacks;
 
   TargetMachine *TM = TheTarget->createTargetMachine(Triple, TargetOpts.CPU,
                                                      FeaturesStr, Options,
@@ -527,6 +537,8 @@ void EmitAssemblyHelper::EmitAssembly(BackendAction Action, raw_ostream *OS) {
                       Action != Backend_EmitBC &&
                       Action != Backend_EmitLL);
   TargetMachine *TM = CreateTargetMachine(UsesCodeGen);
+  if (UsesCodeGen && !TM) return;
+  llvm::OwningPtr<TargetMachine> TMOwner(CodeGenOpts.DisableFree ? 0 : TM);
   CreatePasses(TM);
 
   switch (Action) {

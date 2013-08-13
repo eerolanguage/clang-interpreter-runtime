@@ -40,6 +40,7 @@
 #include "llvm/ADT/PostOrderIterator.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/Timer.h"
@@ -234,11 +235,11 @@ public:
       else if (Mode == AM_Path) {
         llvm::errs() << " (Path, ";
         switch (IMode) {
-          case ExprEngine::Inline_None:
-            llvm::errs() << " Inline_None";
+          case ExprEngine::Inline_Minimal:
+            llvm::errs() << " Inline_Minimal";
             break;
-          case ExprEngine::Inline_All:
-            llvm::errs() << " Inline_All";
+          case ExprEngine::Inline_Regular:
+            llvm::errs() << " Inline_Regular";
             break;
         }
         llvm::errs() << ")";
@@ -284,7 +285,8 @@ public:
   virtual void HandleTranslationUnit(ASTContext &C);
 
   /// \brief Determine which inlining mode should be used when this function is
-  /// analyzed. For example, determines if the callees should be inlined.
+  /// analyzed. This allows to redefine the default inlining policies when
+  /// analyzing a given function.
   ExprEngine::InliningModes
   getInliningModeForFunction(const Decl *D, SetOfConstDecls Visited);
 
@@ -299,7 +301,7 @@ public:
   /// set of functions which should be considered analyzed after analyzing the
   /// given root function.
   void HandleCode(Decl *D, AnalysisMode Mode,
-                  ExprEngine::InliningModes IMode = ExprEngine::Inline_None,
+                  ExprEngine::InliningModes IMode = ExprEngine::Inline_Minimal,
                   SetOfConstDecls *VisitedCallees = 0);
 
   void RunPathSensitiveChecks(Decl *D,
@@ -410,22 +412,18 @@ static bool shouldSkipFunction(const Decl *D,
 ExprEngine::InliningModes
 AnalysisConsumer::getInliningModeForFunction(const Decl *D,
                                              SetOfConstDecls Visited) {
-  ExprEngine::InliningModes HowToInline =
-      (Mgr->shouldInlineCall()) ? ExprEngine::Inline_All :
-                                  ExprEngine::Inline_None;
-
   // We want to reanalyze all ObjC methods as top level to report Retain
-  // Count naming convention errors more aggressively. But we can turn off
+  // Count naming convention errors more aggressively. But we should tune down
   // inlining when reanalyzing an already inlined function.
   if (Visited.count(D)) {
     assert(isa<ObjCMethodDecl>(D) &&
            "We are only reanalyzing ObjCMethods.");
     const ObjCMethodDecl *ObjCM = cast<ObjCMethodDecl>(D);
     if (ObjCM->getMethodFamily() != OMF_init)
-      HowToInline = ExprEngine::Inline_None;
+      return ExprEngine::Inline_Minimal;
   }
 
-  return HowToInline;
+  return ExprEngine::Inline_Regular;
 }
 
 void AnalysisConsumer::HandleDeclsCallGraph(const unsigned LocalTUDeclsSize) {
@@ -595,7 +593,7 @@ void AnalysisConsumer::HandleCode(Decl *D, AnalysisMode Mode,
     checkerMgr->runCheckersOnASTBody(D, *Mgr, BR);
   if ((Mode & AM_Path) && checkerMgr->hasPathSensitiveCheckers()) {
     RunPathSensitiveChecks(D, IMode, VisitedCallees);
-    if (IMode != ExprEngine::Inline_None)
+    if (IMode != ExprEngine::Inline_Minimal)
       NumFunctionsAnalyzed++;
   }
 }
@@ -683,15 +681,14 @@ namespace {
 
 class UbigraphViz : public ExplodedNode::Auditor {
   OwningPtr<raw_ostream> Out;
-  llvm::sys::Path Dir, Filename;
+  std::string Filename;
   unsigned Cntr;
 
   typedef llvm::DenseMap<void*,unsigned> VMap;
   VMap M;
 
 public:
-  UbigraphViz(raw_ostream *out, llvm::sys::Path& dir,
-              llvm::sys::Path& filename);
+  UbigraphViz(raw_ostream *Out, StringRef Filename);
 
   ~UbigraphViz();
 
@@ -701,28 +698,15 @@ public:
 } // end anonymous namespace
 
 static ExplodedNode::Auditor* CreateUbiViz() {
-  std::string ErrMsg;
-
-  llvm::sys::Path Dir = llvm::sys::Path::GetTemporaryDirectory(&ErrMsg);
-  if (!ErrMsg.empty())
-    return 0;
-
-  llvm::sys::Path Filename = Dir;
-  Filename.appendComponent("llvm_ubi");
-  Filename.makeUnique(true,&ErrMsg);
-
-  if (!ErrMsg.empty())
-    return 0;
-
-  llvm::errs() << "Writing '" << Filename.str() << "'.\n";
+  SmallString<128> P;
+  int FD;
+  llvm::sys::fs::createTemporaryFile("llvm_ubi", "", FD, P);
+  llvm::errs() << "Writing '" << P.str() << "'.\n";
 
   OwningPtr<llvm::raw_fd_ostream> Stream;
-  Stream.reset(new llvm::raw_fd_ostream(Filename.c_str(), ErrMsg));
+  Stream.reset(new llvm::raw_fd_ostream(FD, true));
 
-  if (!ErrMsg.empty())
-    return 0;
-
-  return new UbigraphViz(Stream.take(), Dir, Filename);
+  return new UbigraphViz(Stream.take(), P);
 }
 
 void UbigraphViz::AddEdge(ExplodedNode *Src, ExplodedNode *Dst) {
@@ -759,9 +743,8 @@ void UbigraphViz::AddEdge(ExplodedNode *Src, ExplodedNode *Dst) {
        << ", ('arrow','true'), ('oriented', 'true'))\n";
 }
 
-UbigraphViz::UbigraphViz(raw_ostream *out, llvm::sys::Path& dir,
-                         llvm::sys::Path& filename)
-  : Out(out), Dir(dir), Filename(filename), Cntr(0) {
+UbigraphViz::UbigraphViz(raw_ostream *Out, StringRef Filename)
+  : Out(Out), Filename(Filename), Cntr(0) {
 
   *Out << "('vertex_style_attribute', 0, ('shape', 'icosahedron'))\n";
   *Out << "('vertex_style', 1, 0, ('shape', 'sphere'), ('color', '#ffcc66'),"
@@ -772,16 +755,16 @@ UbigraphViz::~UbigraphViz() {
   Out.reset(0);
   llvm::errs() << "Running 'ubiviz' program... ";
   std::string ErrMsg;
-  llvm::sys::Path Ubiviz = llvm::sys::Program::FindProgramByName("ubiviz");
+  std::string Ubiviz = llvm::sys::FindProgramByName("ubiviz");
   std::vector<const char*> args;
   args.push_back(Ubiviz.c_str());
   args.push_back(Filename.c_str());
   args.push_back(0);
 
-  if (llvm::sys::Program::ExecuteAndWait(Ubiviz, &args[0],0,0,0,0,&ErrMsg)) {
+  if (llvm::sys::ExecuteAndWait(Ubiviz, &args[0], 0, 0, 0, 0, &ErrMsg)) {
     llvm::errs() << "Error viewing graph: " << ErrMsg << "\n";
   }
 
-  // Delete the directory.
-  Dir.eraseFromDisk(true);
+  // Delete the file.
+  llvm::sys::fs::remove(Filename);
 }

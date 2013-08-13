@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -fsyntax-only %s -std=c++98 2>&1 | FileCheck %s
+// RUN: not %clang_cc1 -fsyntax-only %s -std=c++98 2>&1 | FileCheck %s
 
 namespace PR14342 {
   template<typename T, char a> struct X {};
@@ -30,4 +30,20 @@ namespace default_args {
     A<0, 2, 0> N2 = M;
   }
 
+}
+
+namespace qualifiers {
+  template <class T>
+  void foo(void (func(T*)), T*) {}
+
+  template <class T>
+  class vector{};
+
+  void bar(const vector<int>*) {}
+
+  void test(volatile vector<int>* V) {
+    foo(bar, V);
+  }
+
+  // CHECK: candidate template ignored: deduced conflicting types for parameter 'T' ('const vector<[...]>' vs. 'volatile vector<[...]>')
 }

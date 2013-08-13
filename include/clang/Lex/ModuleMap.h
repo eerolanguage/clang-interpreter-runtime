@@ -52,37 +52,57 @@ class ModuleMap {
   /// These are always simple C language options.
   LangOptions MMapLangOpts;
 
+  // The module that we are building; related to \c LangOptions::CurrentModule.
+  Module *CompilingModule;
+
   /// \brief The top-level modules that are known.
   llvm::StringMap<Module *> Modules;
+
+public:
+  /// \brief Describes the role of a module header.
+  enum ModuleHeaderRole {
+    /// \brief This header is normally included in the module.
+    NormalHeader,
+    /// \brief This header is included but private.
+    PrivateHeader,
+    /// \brief This header is explicitly excluded from the module.
+    ExcludedHeader
+    // Caution: Adding an enumerator needs other changes.
+    // Adjust the number of bits for KnownHeader::Storage.
+    // Adjust the bitfield HeaderFileInfo::HeaderRole size.
+    // Adjust the HeaderFileInfoTrait::ReadData streaming.
+    // Adjust the HeaderFileInfoTrait::EmitData streaming.
+  };
 
   /// \brief A header that is known to reside within a given module,
   /// whether it was included or excluded.
   class KnownHeader {
-    llvm::PointerIntPair<Module *, 1, bool> Storage;
+    llvm::PointerIntPair<Module *, 2, ModuleHeaderRole> Storage;
 
   public:
-    KnownHeader() : Storage(0, false) { }
-    KnownHeader(Module *M, bool Excluded) : Storage(M, Excluded) { }
+    KnownHeader() : Storage(0, NormalHeader) { }
+    KnownHeader(Module *M, ModuleHeaderRole Role) : Storage(M, Role) { }
 
     /// \brief Retrieve the module the header is stored in.
     Module *getModule() const { return Storage.getPointer(); }
 
-    /// \brief Whether this header is explicitly excluded from the module.
-    bool isExcluded() const { return Storage.getInt(); }
+    /// \brief The role of this header within the module.
+    ModuleHeaderRole getRole() const { return Storage.getInt(); }
 
     /// \brief Whether this header is available in the module.
     bool isAvailable() const { 
-      return !isExcluded() && getModule()->isAvailable(); 
+      return getRole() != ExcludedHeader && getModule()->isAvailable(); 
     }
 
     // \brief Whether this known header is valid (i.e., it has an
     // associated module).
-    operator bool() const { return Storage.getPointer() != 0; }
+    LLVM_EXPLICIT operator bool() const { return Storage.getPointer() != 0; }
   };
 
+private:
   typedef llvm::DenseMap<const FileEntry *, KnownHeader> HeadersMap;
 
-  /// \brief Mapping from each header to the module that owns the contents of the
+  /// \brief Mapping from each header to the module that owns the contents of
   /// that header.
   HeadersMap Headers;
   
@@ -134,7 +154,20 @@ class ModuleMap {
   Module::ExportDecl 
   resolveExport(Module *Mod, const Module::UnresolvedExportDecl &Unresolved,
                 bool Complain) const;
-  
+
+  /// \brief Resolve the given module id to an actual module.
+  ///
+  /// \param Id The module-id to resolve.
+  ///
+  /// \param Mod The module in which we're resolving the module-id.
+  ///
+  /// \param Complain Whether this routine should complain about unresolvable
+  /// module-ids.
+  ///
+  /// \returns The resolved module, or null if the module-id could not be
+  /// resolved.
+  Module *resolveModuleId(const ModuleId &Id, Module *Mod, bool Complain) const;
+
 public:
   /// \brief Construct a new module map.
   ///
@@ -148,7 +181,7 @@ public:
   /// \param LangOpts Language options for this translation unit.
   ///
   /// \param Target The target for this translation unit.
-  ModuleMap(FileManager &FileMgr, const DiagnosticConsumer &DC,
+  ModuleMap(FileManager &FileMgr, DiagnosticConsumer &DC,
             const LangOptions &LangOpts, const TargetInfo *Target,
             HeaderSearch &HeaderInfo);
 
@@ -169,9 +202,10 @@ public:
   ///
   /// \param File The header file that is likely to be included.
   ///
-  /// \returns The module that owns the given header file, or null to indicate
+  /// \returns The module KnownHeader, which provides the module that owns the
+  /// given header file.  The KnownHeader is default constructed to indicate
   /// that no module owns this header file.
-  Module *findModuleForHeader(const FileEntry *File);
+  KnownHeader findModuleForHeader(const FileEntry *File);
 
   /// \brief Determine whether the given header is part of a module
   /// marked 'unavailable'.
@@ -265,7 +299,17 @@ public:
   /// false otherwise.
   bool resolveExports(Module *Mod, bool Complain);
 
-  /// \brief Infers the (sub)module based on the given source location and 
+  /// \brief Resolve all of the unresolved conflicts in the given module.
+  ///
+  /// \param Mod The module whose conflicts should be resolved.
+  ///
+  /// \param Complain Whether to emit diagnostics for failures.
+  ///
+  /// \returns true if any errors were encountered while resolving conflicts,
+  /// false otherwise.
+  bool resolveConflicts(Module *Mod, bool Complain);
+
+  /// \brief Infers the (sub)module based on the given source location and
   /// source manager.
   ///
   /// \param Loc The location within the source that we are querying, along
@@ -284,17 +328,20 @@ public:
   void setUmbrellaDir(Module *Mod, const DirectoryEntry *UmbrellaDir);
 
   /// \brief Adds this header to the given module.
-  /// \param Excluded Whether this header is explicitly excluded from the
-  /// module; otherwise, it's included in the module.
-  void addHeader(Module *Mod, const FileEntry *Header, bool Excluded);
+  /// \param Role The role of the header wrt the module.
+  void addHeader(Module *Mod, const FileEntry *Header,
+                 ModuleHeaderRole Role);
 
   /// \brief Parse the given module map file, and record any modules we 
   /// encounter.
   ///
   /// \param File The file to be parsed.
   ///
+  /// \param IsSystem Whether this module map file is in a system header
+  /// directory, and therefore should be considered a system module.
+  ///
   /// \returns true if an error occurred, false otherwise.
-  bool parseModuleMapFile(const FileEntry *File);
+  bool parseModuleMapFile(const FileEntry *File, bool IsSystem);
     
   /// \brief Dump the contents of the module map, for debugging purposes.
   void dump();

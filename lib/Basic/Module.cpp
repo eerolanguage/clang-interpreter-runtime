@@ -28,7 +28,8 @@ Module::Module(StringRef Name, SourceLocation DefinitionLoc, Module *Parent,
     Umbrella(), ASTFile(0), IsAvailable(true), IsFromModuleFile(false),
     IsFramework(IsFramework), IsExplicit(IsExplicit), IsSystem(false),
     InferSubmodules(false), InferExplicitSubmodules(false), 
-    InferExportWildcard(false), NameVisibility(Hidden) 
+    InferExportWildcard(false), ConfigMacrosExhaustive(false),
+    NameVisibility(Hidden)
 { 
   if (Parent) {
     if (!Parent->isAvailable())
@@ -46,7 +47,6 @@ Module::~Module() {
        I != IEnd; ++I) {
     delete *I;
   }
-  
 }
 
 /// \brief Determine whether a translation unit built using the current
@@ -111,8 +111,8 @@ std::string Module::getFullModuleName() const {
     Names.push_back(M->Name);
   
   std::string Result;
-  for (SmallVector<StringRef, 2>::reverse_iterator I = Names.rbegin(),
-                                                IEnd = Names.rend();
+  for (SmallVectorImpl<StringRef>::reverse_iterator I = Names.rbegin(),
+                                                 IEnd = Names.rend();
        I != IEnd; ++I) {
     if (!Result.empty())
       Result += '.';
@@ -242,6 +242,24 @@ void Module::getExportedModules(SmallVectorImpl<Module *> &Exported) const {
   }
 }
 
+void Module::buildVisibleModulesCache() const {
+  assert(VisibleModulesCache.empty() && "cache does not need building");
+
+  // This module is visible to itself.
+  VisibleModulesCache.insert(this);
+
+  llvm::SmallVector<Module*, 4> Exported;
+  for (unsigned I = 0, N = Imports.size(); I != N; ++I) {
+    // Every imported module is visible.
+    VisibleModulesCache.insert(Imports[I]);
+
+    // Every module exported by an imported module is visible.
+    Imports[I]->getExportedModules(Exported);
+    VisibleModulesCache.insert(Exported.begin(), Exported.end());
+    Exported.clear();
+  }
+}
+
 void Module::print(raw_ostream &OS, unsigned Indent) const {
   OS.indent(Indent);
   if (IsFramework)
@@ -279,11 +297,24 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
     OS.write_escaped(UmbrellaDir->getName());
     OS << "\"\n";    
   }
-  
-  for (unsigned I = 0, N = Headers.size(); I != N; ++I) {
+
+  if (!ConfigMacros.empty() || ConfigMacrosExhaustive) {
+    OS.indent(Indent + 2);
+    OS << "config_macros ";
+    if (ConfigMacrosExhaustive)
+      OS << "[exhaustive]";
+    for (unsigned I = 0, N = ConfigMacros.size(); I != N; ++I) {
+      if (I)
+        OS << ", ";
+      OS << ConfigMacros[I];
+    }
+    OS << "\n";
+  }
+
+  for (unsigned I = 0, N = NormalHeaders.size(); I != N; ++I) {
     OS.indent(Indent + 2);
     OS << "header \"";
-    OS.write_escaped(Headers[I]->getName());
+    OS.write_escaped(NormalHeaders[I]->getName());
     OS << "\"\n";
   }
 
@@ -291,6 +322,13 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
     OS.indent(Indent + 2);
     OS << "exclude header \"";
     OS.write_escaped(ExcludedHeaders[I]->getName());
+    OS << "\"\n";
+  }
+
+  for (unsigned I = 0, N = PrivateHeaders.size(); I != N; ++I) {
+    OS.indent(Indent + 2);
+    OS << "private header \"";
+    OS.write_escaped(PrivateHeaders[I]->getName());
     OS << "\"\n";
   }
   
@@ -332,6 +370,24 @@ void Module::print(raw_ostream &OS, unsigned Indent) const {
     OS << "\"";
     OS.write_escaped(LinkLibraries[I].Library);
     OS << "\"";
+  }
+
+  for (unsigned I = 0, N = UnresolvedConflicts.size(); I != N; ++I) {
+    OS.indent(Indent + 2);
+    OS << "conflict ";
+    printModuleId(OS, UnresolvedConflicts[I].Id);
+    OS << ", \"";
+    OS.write_escaped(UnresolvedConflicts[I].Message);
+    OS << "\"\n";
+  }
+
+  for (unsigned I = 0, N = Conflicts.size(); I != N; ++I) {
+    OS.indent(Indent + 2);
+    OS << "conflict ";
+    OS << Conflicts[I].Other->getFullModuleName();
+    OS << ", \"";
+    OS.write_escaped(Conflicts[I].Message);
+    OS << "\"\n";
   }
 
   if (InferSubmodules) {

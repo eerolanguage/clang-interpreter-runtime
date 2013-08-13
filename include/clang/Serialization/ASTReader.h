@@ -22,9 +22,9 @@
 #include "clang/Basic/FileSystemOptions.h"
 #include "clang/Basic/IdentifierTable.h"
 #include "clang/Basic/SourceManager.h"
+#include "clang/Basic/Version.h"
 #include "clang/Lex/ExternalPreprocessorSource.h"
 #include "clang/Lex/HeaderSearch.h"
-#include "clang/Lex/PPMutationListener.h"
 #include "clang/Lex/PreprocessingRecord.h"
 #include "clang/Sema/ExternalSemaSource.h"
 #include "clang/Serialization/ASTBitCodes.h"
@@ -48,6 +48,7 @@
 #include <string>
 #include <utility>
 #include <vector>
+#include <sys/stat.h>
 
 namespace llvm {
   class MemoryBuffer;
@@ -98,6 +99,14 @@ class ASTUnresolvedSet;
 class ASTReaderListener {
 public:
   virtual ~ASTReaderListener();
+
+  /// \brief Receives the full Clang version information.
+  ///
+  /// \returns true to indicate that the version is invalid. Subclasses should
+  /// generally defer to this implementation.
+  virtual bool ReadFullVersionInformation(StringRef FullVersion) {
+    return FullVersion != getClangFullRepositoryVersion();
+  }
 
   /// \brief Receives the language options.
   ///
@@ -157,12 +166,19 @@ public:
     return false;
   }
 
-  /// \brief Receives a HeaderFileInfo entry.
-  virtual void ReadHeaderFileInfo(const HeaderFileInfo &HFI, unsigned ID) {}
-
   /// \brief Receives __COUNTER__ value.
   virtual void ReadCounter(const serialization::ModuleFile &M,
                            unsigned Value) {}
+
+  /// \brief Returns true if this \c ASTReaderListener wants to receive the
+  /// input files of the AST file via \c visitInputFile, false otherwise.
+  virtual bool needsInputFileVisitation() { return false; }
+
+  /// \brief if \c needsInputFileVisitation returns true, this is called for each
+  /// input file of the AST file.
+  ///
+  /// \returns true to continue receiving the next input file, false to stop.
+  virtual bool visitInputFile(StringRef Filename, bool isSystem) { return true;}
 };
 
 /// \brief ASTReaderListener implementation to validate the information of
@@ -171,11 +187,9 @@ class PCHValidator : public ASTReaderListener {
   Preprocessor &PP;
   ASTReader &Reader;
 
-  unsigned NumHeaderInfos;
-
 public:
   PCHValidator(Preprocessor &PP, ASTReader &Reader)
-    : PP(PP), Reader(Reader), NumHeaderInfos(0) {}
+    : PP(PP), Reader(Reader) {}
 
   virtual bool ReadLanguageOptions(const LangOptions &LangOpts,
                                    bool Complain);
@@ -184,7 +198,6 @@ public:
   virtual bool ReadPreprocessorOptions(const PreprocessorOptions &PPOpts,
                                        bool Complain,
                                        std::string &SuggestedPredefines);
-  virtual void ReadHeaderFileInfo(const HeaderFileInfo &HFI, unsigned ID);
   virtual void ReadCounter(const serialization::ModuleFile &M, unsigned Value);
 
 private:
@@ -227,6 +240,7 @@ class ASTReader
 {
 public:
   typedef SmallVector<uint64_t, 64> RecordData;
+  typedef SmallVectorImpl<uint64_t> RecordDataImpl;
 
   /// \brief The result of reading the control block of an AST file, which
   /// can fail for various reasons.
@@ -236,6 +250,8 @@ public:
     Success,
     /// \brief The AST file itself appears corrupted.
     Failure,
+    /// \brief The AST file was missing.
+    Missing,
     /// \brief The AST file is out-of-date relative to its input files,
     /// and needs to be regenerated.
     OutOfDate,
@@ -293,6 +309,10 @@ private:
 
   /// \brief The module manager which manages modules and their dependencies
   ModuleManager ModuleMgr;
+
+  /// \brief The location where the module file will be considered as
+  /// imported from. For non-module AST types it should be invalid.
+  SourceLocation CurrentImportLoc;
 
   /// \brief The global module index, if loaded.
   llvm::OwningPtr<GlobalModuleIndex> GlobalIndex;
@@ -427,7 +447,7 @@ private:
   /// If the pointer at index I is non-NULL, then it refers to the
   /// MacroInfo for the identifier with ID=I+1 that has already
   /// been loaded.
-  std::vector<MacroDirective *> MacrosLoaded;
+  std::vector<MacroInfo *> MacrosLoaded;
 
   typedef ContinuousRangeMap<serialization::MacroID, ModuleFile *, 4>
     GlobalMacroMapType;
@@ -436,15 +456,6 @@ private:
   /// macro resides along with the offset that should be added to the
   /// global macro ID to produce a local ID.
   GlobalMacroMapType GlobalMacroMap;
-
-  typedef llvm::DenseMap<serialization::MacroID,
-            SmallVector<std::pair<serialization::SubmoduleID,
-                                        MacroUpdate>, 1> >
-    MacroUpdatesMap;
-
-  /// \brief Mapping from (global) macro IDs to the set of updates to be
-  /// performed to the corresponding macro.
-  MacroUpdatesMap MacroUpdates;
 
   /// \brief A vector containing submodules that have already been loaded.
   ///
@@ -465,13 +476,10 @@ private:
   public:
     enum NameKind {
       Declaration,
-      MacroVisibility,
-      MacroUndef
+      MacroVisibility
     } Kind;
 
   private:
-    unsigned Loc;
-
     union {
       Decl *D;
       MacroDirective *MD;
@@ -480,13 +488,10 @@ private:
     IdentifierInfo *Id;
 
   public:
-    HiddenName(Decl *D) : Kind(Declaration), Loc(), D(D), Id() { }
+    HiddenName(Decl *D) : Kind(Declaration), D(D), Id() { }
 
     HiddenName(IdentifierInfo *II, MacroDirective *MD)
-      : Kind(MacroVisibility), Loc(), MD(MD), Id(II) { }
-
-    HiddenName(IdentifierInfo *II, MacroDirective *MD, SourceLocation Loc)
-      : Kind(MacroUndef), Loc(Loc.getRawEncoding()), MD(MD), Id(II) { }
+      : Kind(MacroVisibility), MD(MD), Id(II) { }
 
     NameKind getKind() const { return Kind; }
 
@@ -496,14 +501,8 @@ private:
     }
 
     std::pair<IdentifierInfo *, MacroDirective *> getMacro() const {
-      assert((getKind() == MacroUndef || getKind() == MacroVisibility)
-             && "Hidden name is not a macro!");
+      assert(getKind() == MacroVisibility && "Hidden name is not a macro!");
       return std::make_pair(Id, MD);
-    }
-
-    SourceLocation getMacroUndefLoc() const {
-      assert(getKind() == MacroUndef && "Hidden name is not an undef!");
-      return SourceLocation::getFromRawEncoding(Loc);
     }
 };
 
@@ -517,27 +516,30 @@ private:
   HiddenNamesMapType HiddenNamesMap;
   
   
-  /// \brief A module import or export that hasn't yet been resolved.
-  struct UnresolvedModuleImportExport {
+  /// \brief A module import, export, or conflict that hasn't yet been resolved.
+  struct UnresolvedModuleRef {
     /// \brief The file in which this module resides.
     ModuleFile *File;
     
     /// \brief The module that is importing or exporting.
     Module *Mod;
-    
+
+    /// \brief The kind of module reference.
+    enum { Import, Export, Conflict } Kind;
+
     /// \brief The local ID of the module that is being exported.
     unsigned ID;
-    
-    /// \brief Whether this is an import (vs. an export).
-    unsigned IsImport : 1;
-    
+
     /// \brief Whether this is a wildcard export.
     unsigned IsWildcard : 1;
+
+    /// \brief String data.
+    StringRef String;
   };
   
   /// \brief The set of module imports and exports that still need to be 
   /// resolved.
-  SmallVector<UnresolvedModuleImportExport, 2> UnresolvedModuleImportExports;
+  SmallVector<UnresolvedModuleRef, 2> UnresolvedModuleRefs;
   
   /// \brief A vector containing selectors that have already been loaded.
   ///
@@ -558,8 +560,35 @@ private:
   /// global method pool for this selector.
   llvm::DenseMap<Selector, unsigned> SelectorGeneration;
 
-  typedef llvm::MapVector<IdentifierInfo *,
-                          SmallVector<serialization::MacroID, 2> >
+  struct PendingMacroInfo {
+    ModuleFile *M;
+
+    struct ModuleMacroDataTy {
+      serialization::GlobalMacroID GMacID;
+      unsigned ImportLoc;
+    };
+    struct PCHMacroDataTy {
+      uint64_t MacroDirectivesOffset;
+    };
+
+    union {
+      ModuleMacroDataTy ModuleMacroData;
+      PCHMacroDataTy PCHMacroData;
+    };
+
+    PendingMacroInfo(ModuleFile *M,
+                     serialization::GlobalMacroID GMacID,
+                     SourceLocation ImportLoc) : M(M) {
+      ModuleMacroData.GMacID = GMacID;
+      ModuleMacroData.ImportLoc = ImportLoc.getRawEncoding();
+    }
+
+    PendingMacroInfo(ModuleFile *M, uint64_t MacroDirectivesOffset) : M(M) {
+      PCHMacroData.MacroDirectivesOffset = MacroDirectivesOffset;
+    }
+  };
+
+  typedef llvm::MapVector<IdentifierInfo *, SmallVector<PendingMacroInfo, 2> >
     PendingMacroIDsMap;
 
   /// \brief Mapping from identifiers that have a macro history to the global
@@ -681,6 +710,9 @@ private:
   /// \brief A list of undefined decls with internal linkage followed by the
   /// SourceLocation of a matching ODR-use.
   SmallVector<uint64_t, 8> UndefinedButUsed;
+
+  // \brief A list of late parsed template function data.
+  SmallVector<uint64_t, 1> LateParsedTemplates;
 
   /// \brief A list of modules that were imported by precompiled headers or
   /// any other non-module AST file.
@@ -879,16 +911,13 @@ private:
   /// the given canonical declaration.
   MergedDeclsMap::iterator
   combineStoredMergedDecls(Decl *Canon, serialization::GlobalDeclID CanonID);
-  
-  /// \brief Ready to load the previous declaration of the given Decl.
-  void loadAndAttachPreviousDecl(Decl *D, serialization::DeclID ID);
 
   /// \brief When reading a Stmt tree, Stmt operands are placed in this stack.
   SmallVector<Stmt *, 16> StmtStack;
 
   /// \brief What kind of records we are reading.
   enum ReadingKind {
-    Read_Decl, Read_Type, Read_Stmt
+    Read_None, Read_Decl, Read_Type, Read_Stmt
   };
 
   /// \brief What kind of records we are reading.
@@ -949,6 +978,7 @@ private:
   ASTReadResult ReadASTCore(StringRef FileName, ModuleKind Type,
                             SourceLocation ImportLoc, ModuleFile *ImportedBy,
                             SmallVectorImpl<ImportedModule> &Loaded,
+                            off_t ExpectedSize, time_t ExpectedModTime,
                             unsigned ClientLoadCapabilities);
   ASTReadResult ReadControlBlock(ModuleFile &F,
                                  SmallVectorImpl<ImportedModule> &Loaded,
@@ -1085,6 +1115,8 @@ private:
 
   void finishPendingActions();
 
+  void pushExternalDeclIntoScope(NamedDecl *D, DeclarationName Name);
+
   void addPendingDeclContextInfo(Decl *D,
                                  serialization::GlobalDeclID SemaDC,
                                  serialization::GlobalDeclID LexicalDC) {
@@ -1146,15 +1178,18 @@ public:
     /// \brief The client can't handle any AST loading failures.
     ARR_None = 0,
     /// \brief The client can handle an AST file that cannot load because it
+    /// is missing.
+    ARR_Missing = 0x1,
+    /// \brief The client can handle an AST file that cannot load because it
     /// is out-of-date relative to its input files.
-    ARR_OutOfDate = 0x1,
+    ARR_OutOfDate = 0x2,
     /// \brief The client can handle an AST file that cannot load because it
     /// was built with a different version of Clang.
-    ARR_VersionMismatch = 0x2,
+    ARR_VersionMismatch = 0x4,
     /// \brief The client can handle an AST file that cannot load because it's
     /// compiled configuration doesn't match that of the context it was
     /// loaded into.
-    ARR_ConfigurationMismatch = 0x4
+    ARR_ConfigurationMismatch = 0x8
   };
 
   /// \brief Load the AST file designated by the given file name.
@@ -1181,12 +1216,17 @@ public:
   ///
   /// \param NameVisibility The level of visibility to give the names in the
   /// module.  Visibility can only be increased over time.
+  ///
+  /// \param ImportLoc The location at which the import occurs.
+  ///
+  /// \param Complain Whether to complain about conflicting module imports.
   void makeModuleVisible(Module *Mod, 
                          Module::NameVisibilityKind NameVisibility,
-                         SourceLocation ImportLoc);
+                         SourceLocation ImportLoc,
+                         bool Complain);
   
   /// \brief Make the names within this set of hidden names visible.
-  void makeNamesVisible(const HiddenNames &Names);
+  void makeNamesVisible(const HiddenNames &Names, Module *Owner);
   
   /// \brief Set the AST callbacks listener.
   void setListener(ASTReaderListener *listener) {
@@ -1197,7 +1237,7 @@ public:
   void setDeserializationListener(ASTDeserializationListener *Listener);
 
   /// \brief Determine whether this AST reader has a global index.
-  bool hasGlobalIndex() const { return GlobalIndex; }
+  bool hasGlobalIndex() const { return GlobalIndex.isValid(); }
 
   /// \brief Attempts to load the global index.
   ///
@@ -1344,6 +1384,10 @@ public:
   TemplateArgumentLoc
   ReadTemplateArgumentLoc(ModuleFile &F,
                           const RecordData &Record, unsigned &Idx);
+
+  const ASTTemplateArgumentListInfo*
+  ReadASTTemplateArgumentListInfo(ModuleFile &F,
+                                  const RecordData &Record, unsigned &Index);
 
   /// \brief Reads a declarator info from the given record.
   TypeSourceInfo *GetTypeSourceInfo(ModuleFile &F,
@@ -1529,7 +1573,7 @@ public:
 
   /// \brief Retrieve an iterator into the set of all identifiers
   /// in all loaded AST files.
-  virtual IdentifierIterator *getIdentifiers() const;
+  virtual IdentifierIterator *getIdentifiers();
 
   /// \brief Load the contents of the global method pool for a given
   /// selector.
@@ -1571,6 +1615,9 @@ public:
                  SmallVectorImpl<std::pair<ValueDecl *,
                                            SourceLocation> > &Pending);
 
+  virtual void ReadLateParsedTemplates(
+      llvm::DenseMap<const FunctionDecl *, LateParsedTemplate *> &LPTMap);
+
   /// \brief Load a selector from disk, registering its ID if it exists.
   void LoadSelector(Selector Sel);
 
@@ -1604,8 +1651,16 @@ public:
   serialization::IdentifierID getGlobalIdentifierID(ModuleFile &M,
                                                     unsigned LocalID);
 
+  void resolvePendingMacro(IdentifierInfo *II, const PendingMacroInfo &PMInfo);
+
+  void installPCHMacroDirectives(IdentifierInfo *II,
+                                 ModuleFile &M, uint64_t Offset);
+
+  void installImportedMacro(IdentifierInfo *II, MacroDirective *MD,
+                            Module *Owner);
+
   /// \brief Retrieve the macro with the given ID.
-  MacroDirective *getMacro(serialization::MacroID ID, MacroDirective *Hint = 0);
+  MacroInfo *getMacro(serialization::MacroID ID);
 
   /// \brief Retrieve the global macro ID corresponding to the given local
   /// ID within the given module file.
@@ -1685,7 +1740,7 @@ public:
 
   /// \brief Read a template argument array.
   void
-  ReadTemplateArgumentList(SmallVector<TemplateArgument, 8> &TemplArgs,
+  ReadTemplateArgumentList(SmallVectorImpl<TemplateArgument> &TemplArgs,
                            ModuleFile &F, const RecordData &Record,
                            unsigned &Idx);
 
@@ -1713,7 +1768,8 @@ public:
 
   /// \brief Read a source location.
   SourceLocation ReadSourceLocation(ModuleFile &ModuleFile,
-                                    const RecordData &Record, unsigned &Idx) {
+                                    const RecordDataImpl &Record,
+                                    unsigned &Idx) {
     return ReadSourceLocation(ModuleFile, Record[Idx++]);
   }
 
@@ -1763,21 +1819,36 @@ public:
   /// \brief Reads a sub-expression operand during statement reading.
   Expr *ReadSubExpr();
 
+  /// \brief Reads a token out of a record.
+  Token ReadToken(ModuleFile &M, const RecordDataImpl &Record, unsigned &Idx);
+
   /// \brief Reads the macro record located at the given offset.
-  void ReadMacroRecord(ModuleFile &F, uint64_t Offset, MacroDirective *Hint = 0);
+  MacroInfo *ReadMacroRecord(ModuleFile &F, uint64_t Offset);
 
   /// \brief Determine the global preprocessed entity ID that corresponds to
   /// the given local ID within the given module.
   serialization::PreprocessedEntityID
   getGlobalPreprocessedEntityID(ModuleFile &M, unsigned LocalID) const;
 
-  /// \brief Note that the identifier has a macro history.
+  /// \brief Add a macro to resolve imported from a module.
   ///
   /// \param II The name of the macro.
+  /// \param M The module file.
+  /// \param GMacID The global macro ID that is associated with this identifier.
+  /// \param ImportLoc The location where the module is imported.
+  void addPendingMacroFromModule(IdentifierInfo *II,
+                                 ModuleFile *M,
+                                 serialization::GlobalMacroID GMacID,
+                                 SourceLocation ImportLoc);
+
+  /// \brief Add a macro to deserialize its macro directive history from a PCH.
   ///
-  /// \param IDs The global macro IDs that are associated with this identifier.
-  void setIdentifierIsMacro(IdentifierInfo *II,
-                            ArrayRef<serialization::MacroID> IDs);
+  /// \param II The name of the macro.
+  /// \param M The module file.
+  /// \param MacroDirectivesOffset Offset of the serialized macro directive
+  /// history.
+  void addPendingMacroFromPCH(IdentifierInfo *II,
+                              ModuleFile *M, uint64_t MacroDirectivesOffset);
 
   /// \brief Read the set of macros defined by this external macro source.
   virtual void ReadDefinedMacros();

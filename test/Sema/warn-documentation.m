@@ -123,6 +123,20 @@ typedef id OBJ;
 }
 @end
 
+// rdar://12379114
+// expected-warning@+4 {{'@methodgroup' command should be used in a comment attached to an Objective-C method declaration}}
+// expected-warning@+6 {{'@method' command should be used in a comment attached to an Objective-C method declaratio}}
+@interface rdar12379114
+/*!
+ @methodgroup Creating a request
+*/
+/*!
+ @method initWithTimeout is the 2nd method
+*/
+typedef unsigned int NSTimeInterval;
+- (id)initWithTimeout:(NSTimeInterval)timeout;
+@end
+
 // expected-warning@+2 {{'@protocol' command should not be used in a comment attached to a non-protocol declaration}}
 /*!
 @protocol PROTO
@@ -135,6 +149,7 @@ struct S;
 @class NSArray;
 @interface NSArray @end
 
+// expected-warning@+3 {{unknown command tag name}}
 /*!
 @interface NSMutableArray 
 @super NSArray
@@ -157,3 +172,60 @@ struct S;
   @struct S1 THIS IS IT
 */
 @interface S1 @end
+
+// expected-warning@+1 {{unknown command tag name}}
+/// \t bbb IS_DOXYGEN_END
+int FooBar();
+
+// rdar://13836387
+/** \brief Module handling the incoming notifications from the system.
+ *
+ * This includes:
+ * - Network Reachability
+ * - Power State
+ * - Low Disk
+ */
+@interface BRC : NSObject
+- (void)removeReach:(NSObject*)observer;
+@end
+
+@implementation BRC : NSObject
+- (void)removeReach:(NSObject*)observer // expected-note {{previous declaration is here}}
+{
+}
+- (void)removeReach:(NSObject*)observer // expected-error {{duplicate declaration of method 'removeReach:'}}
+{
+}
+@end
+
+// rdar://13927330
+/// @class Asset  <- '@class' may be used in a comment attached to a an interface declaration
+@interface Asset : NSObject
+@end
+
+// rdar://14024851 Check that this does not enter an infinite loop
+@interface rdar14024851
+-(void)meth; // expected-note {{declared here}}
+@end
+
+@implementation rdar14024851 // expected-warning {{method definition for 'meth' not found}} expected-note {{previous definition}}
+@end
+
+@implementation rdar14024851 // expected-error {{reimplementation}}
+/// \brief comment
+-(void)meth {}
+@end
+
+// rdar://14124644
+@interface test_vararg1
+/// @param[in] arg somthing
+/// @param[in] ... This is vararg
+- (void) VarArgMeth : (id)arg, ...;
+@end
+
+@implementation test_vararg1
+/// @param[in] arg somthing
+/// @param[in] ... This is vararg
+- (void) VarArgMeth : (id)arg, ... {}
+@end
+
