@@ -24,6 +24,7 @@ target_link_libraries(clang-interpreter
   clangFrontend
   clangSerialization
   clangDriver
+  llvmIRReader
   clangCodeGen
   clangSema
   clangStaticAnalyzerFrontend
