@@ -49,7 +49,10 @@ public:
     GNUstep,
 
     /// 'objfw' is the Objective-C runtime included in ObjFW
-    ObjFW
+    ObjFW,
+
+    /// The host's default Objective-C runtime (for JIT/interpreter mode)
+    Host
   };
 
 private:
@@ -81,6 +84,7 @@ public:
     case GNUstep: return true;
     case ObjFW: return false;
     case iOS: return true;
+    case Host: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -110,6 +114,7 @@ public:
     case FragileMacOSX:
     case MacOSX:
     case iOS:
+    case Host:
       return false;
     case GCC:
     case GNUstep:
@@ -135,6 +140,7 @@ public:
     case GCC: return false;
     case GNUstep: return true;
     case ObjFW: return true;
+    case Host: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -153,6 +159,7 @@ public:
     case GCC: return false;
     case GNUstep: return getVersion() >= VersionTuple(1, 6);
     case ObjFW: return true;
+    case Host: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -200,6 +207,7 @@ public:
     case GCC: return true;
     case GNUstep: return true;
     case ObjFW: return true;
+    case Host: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -222,6 +230,7 @@ public:
     case iOS:
     case GNUstep:
     case ObjFW:
+    case Host:
       return false;
     }
     llvm_unreachable("bad kind");
@@ -244,6 +253,7 @@ public:
     case GCC: return false;
     case GNUstep: return false;
     case ObjFW: return false;
+    case Host: return false;
     }
     llvm_unreachable("bad kind");
   }
@@ -257,6 +267,7 @@ public:
     case GCC: return true;
     case GNUstep: return true;
     case ObjFW: return true;
+    case Host: return true;
     }
     llvm_unreachable("bad kind");
   }
@@ -270,6 +281,7 @@ public:
     case GCC: return true;
     case GNUstep: return true;
     case ObjFW: return true;
+    case Host: return false;
     }
     llvm_unreachable("bad kind");
   }

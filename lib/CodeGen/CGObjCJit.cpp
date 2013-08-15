@@ -324,7 +324,7 @@ CGObjCJit::CGObjCJit(CodeGen::CodeGenModule &cgm)
     ObjCTypes(cgm),
     JitInitFunction(0) {
 
-  puts("Constructing CGObjCJit (host runtime proxy)");
+  //puts("Constructing CGObjCJit (host runtime proxy)");
 
   llvm::PointerType *PtrToInt8Ty =
       llvm::Type::getInt8Ty(VMContext)->getPointerTo();
@@ -349,7 +349,7 @@ CGObjCJit::CGObjCJit(CodeGen::CodeGenModule &cgm)
     LOAD_FN(_ivar_getOffset,                "ivar_getOffset");
     LOAD_FN(_NSGetSizeAndAlignment,         "NSGetSizeAndAlignment");
 
-    puts("Creating .objc_jit_init()");
+    //puts("Creating .objc_jit_init()");
     llvm::FunctionType *initFuncType =
       llvm::FunctionType::get(llvm::Type::getVoidTy(VMContext), false);
 
@@ -962,7 +962,7 @@ CGObjCJit::EmitGCMemmoveCollectable(CodeGen::CodeGenFunction &CGF,
 
 llvm::Constant *CGObjCJit::BuildGCBlockLayout(CodeGenModule &CGM,
     const CGBlockInfo &blockInfo) {
-  puts("Calling CGObjCJit::BuildGCBlockLayout");
+  //puts("Calling CGObjCJit::BuildGCBlockLayout");
   return llvm::Constant::getNullValue(llvm::Type::getInt8PtrTy(VMContext));
 }
 

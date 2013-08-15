@@ -97,6 +97,7 @@ int main(int argc, const char **argv, char * const *envp) {
   // (basically, exactly one input, and the operation mode is hard wired).
   SmallVector<const char *, 16> Args(argv, argv + argc);
   Args.push_back("-fsyntax-only");
+  Args.push_back("-fobjc-runtime=host");
   OwningPtr<Compilation> C(TheDriver.BuildCompilation(Args));
   if (!C)
     return 0;

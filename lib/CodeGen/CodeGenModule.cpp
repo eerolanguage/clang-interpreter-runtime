@@ -146,9 +146,6 @@ CodeGenModule::~CodeGenModule() {
 void CodeGenModule::createObjCRuntime() {
   // This is just isGNUFamily(), but we want to force implementors of
   // new ABIs to decide how best to do this.
-  ObjCRuntime = CreateJitObjCRuntime(*this);
-  return;
-
   switch (LangOpts.ObjCRuntime.getKind()) {
   case ObjCRuntime::GNUstep:
   case ObjCRuntime::GCC:
@@ -160,6 +157,10 @@ void CodeGenModule::createObjCRuntime() {
   case ObjCRuntime::MacOSX:
   case ObjCRuntime::iOS:
     ObjCRuntime = CreateMacObjCRuntime(*this);
+    return;
+
+  case ObjCRuntime::Host:
+    ObjCRuntime = CreateJitObjCRuntime(*this);
     return;
   }
   llvm_unreachable("bad runtime kind");
