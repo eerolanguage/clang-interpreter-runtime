@@ -189,6 +189,7 @@ static const EHPersonality &getObjCPersonality(const LangOptions &L) {
     return getCPersonality(L);
   case ObjCRuntime::MacOSX:
   case ObjCRuntime::iOS:
+  case ObjCRuntime::Host:
     return EHPersonality::NeXT_ObjC;
   case ObjCRuntime::GNUstep:
     if (L.ObjCRuntime.getVersion() >= VersionTuple(1, 7))
@@ -217,6 +218,7 @@ static const EHPersonality &getObjCXXPersonality(const LangOptions &L) {
   // function on targets using (backend-driven) SJLJ EH.
   case ObjCRuntime::MacOSX:
   case ObjCRuntime::iOS:
+  case ObjCRuntime::Host:
     return EHPersonality::NeXT_ObjC;
 
   // In the fragile ABI, just use C++ exception handling and hope
