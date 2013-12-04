@@ -627,7 +627,48 @@ void doNotInvalidateWhenPassedToSystemCalls(char *s) {
   char *p = malloc(12);
   strlen(p);
   strcpy(p, s);
+  strcpy(s, p);
+  strcpy(p, p);
+  memcpy(p, s, 1);
+  memcpy(s, p, 1);
+  memcpy(p, p, 1);
 } // expected-warning {{leak}}
+
+// Treat source buffer contents as escaped.
+void escapeSourceContents(char *s) {
+  char *p = malloc(12);
+  memcpy(s, &p, 12); // no warning
+
+  void *p1 = malloc(7);
+  char *a;
+  memcpy(&a, &p1, sizeof a);
+  // FIXME: No warning due to limitations imposed by current modelling of
+  // 'memcpy' (regions metadata is not copied).
+
+  int *ptrs[2];
+  int *allocated = (int *)malloc(4);
+  memcpy(&ptrs[0], &allocated, sizeof(int *));
+  // FIXME: No warning due to limitations imposed by current modelling of
+  // 'memcpy' (regions metadata is not copied).
+}
+
+void invalidateDestinationContents() {
+  int *null = 0;
+  int *p = (int *)malloc(4);
+  memcpy(&p, &null, sizeof(int *));
+
+  int *ptrs1[2]; // expected-warning {{Potential leak of memory pointed to by}}
+  ptrs1[0] = (int *)malloc(4);
+  memcpy(ptrs1,  &null, sizeof(int *));
+
+  int *ptrs2[2]; // expected-warning {{Potential memory leak}}
+  ptrs2[0] = (int *)malloc(4);
+  memcpy(&ptrs2[1],  &null, sizeof(int *));
+
+  int *ptrs3[2]; // expected-warning {{Potential memory leak}}
+  ptrs3[0] = (int *)malloc(4);
+  memcpy(&ptrs3[0],  &null, sizeof(int *));
+} // expected-warning {{Potential memory leak}}
 
 // Rely on the CString checker evaluation of the strcpy API to convey that the result of strcpy is equal to p.
 void symbolLostWithStrcpy(char *s) {
@@ -1205,6 +1246,48 @@ void freeMemory() {
   while (_nVectorSegments) {
     poolFreeC(_vectorSegments[_nVectorSegments++]);
   }
+}
+
+// PR16730
+void testReallocEscaped(void **memory) {
+  *memory = malloc(47);
+  char *new_memory = realloc(*memory, 47);
+  if (new_memory != 0) {
+    *memory = new_memory;
+  }
+}
+
+// PR16558
+void *smallocNoWarn(size_t size) {
+  if (size == 0) {
+    return malloc(1); // this branch is never called
+  } 
+  else {
+    return malloc(size);
+  }
+}
+
+char *dupstrNoWarn(const char *s) {
+  const int len = strlen(s);
+  char *p = (char*) smallocNoWarn(len + 1);
+  strcpy(p, s); // no-warning
+  return p;
+}
+
+void *smallocWarn(size_t size) {
+  if (size == 2) {
+    return malloc(1);
+  }
+  else {
+    return malloc(size);
+  }
+}
+
+char *dupstrWarn(const char *s) {
+  const int len = strlen(s);
+  char *p = (char*) smallocWarn(len + 1);
+  strcpy(p, s); // expected-warning{{String copy function overflows destination buffer}}
+  return p;
 }
 
 // ----------------------------------------------------------------------------

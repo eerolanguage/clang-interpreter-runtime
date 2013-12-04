@@ -33,7 +33,7 @@ int x, y;
 #pragma omp threadprivate(a,d)  // expected-error {{'#pragma omp threadprivate' must precede all references to variable 'a'}} expected-error {{'#pragma omp threadprivate' must precede all references to variable 'd'}}
 #pragma omp threadprivate(d.a) // expected-error {{expected identifier}}
 #pragma omp threadprivate((float)a) // expected-error {{expected unqualified-id}}
-int foa;
+int foa; // expected-note {{'foa' declared here}}
 #pragma omp threadprivate(faa) // expected-error {{use of undeclared identifier 'faa'; did you mean 'foa'?}}
 #pragma omp threadprivate(foo) // expected-error {{'foo' is not a global variable, static local variable or static data member}}
 #pragma omp threadprivate (int a=2) // expected-error {{expected unqualified-id}}
@@ -60,12 +60,12 @@ class Class {
 #pragma omp threadprivate (g)
 
 namespace ns {
-  int m; // expected-note 2 {{'m' defined here}}
+  int m;
 #pragma omp threadprivate (m)
 }
 #pragma omp threadprivate (m) // expected-error {{use of undeclared identifier 'm'}}
-#pragma omp threadprivate (ns::m) // expected-error {{'#pragma omp threadprivate' must appear in the scope of the 'ns::m' variable declaration}}
-#pragma omp threadprivate (ns:m) // expected-error {{unexpected ':' in nested name specifier; did you mean '::'?}} expected-error {{'#pragma omp threadprivate' must appear in the scope of the 'ns::m' variable declaration}}
+#pragma omp threadprivate (ns::m) // expected-error {{'#pragma omp threadprivate' must precede all references to variable 'ns::m'}}
+#pragma omp threadprivate (ns:m) // expected-error {{unexpected ':' in nested name specifier; did you mean '::'?}} expected-error {{'#pragma omp threadprivate' must precede all references to variable 'ns::m'}}
 
 const int h = 12;
 const volatile int i = 10;

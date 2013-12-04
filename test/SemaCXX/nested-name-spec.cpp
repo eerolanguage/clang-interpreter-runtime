@@ -167,9 +167,7 @@ void N::f() { } // okay
 struct Y;  // expected-note{{forward declaration of 'Y'}}
 Y::foo y; // expected-error{{incomplete type 'Y' named in nested name specifier}}
 
-X::X() : a(5) { } // expected-error{{use of undeclared identifier 'X'}} \
-      // expected-error{{C++ requires a type specifier for all declarations}} \
-      // expected-error{{only constructors take base initializers}}
+X::X() : a(5) { } // expected-error{{use of undeclared identifier 'X'}}
 
 struct foo_S {
   static bool value;
@@ -261,7 +259,7 @@ namespace PR8159 {
 
 namespace rdar7980179 {
   class A { void f0(); }; // expected-note {{previous}}
-  int A::f0() {} // expected-error {{out-of-line definition of 'rdar7980179::A::f0' differs from the declaration in the return type}}
+  int A::f0() {} // expected-error {{return type of out-of-line definition of 'rdar7980179::A::f0' differs}}
 }
 
 namespace alias = A;

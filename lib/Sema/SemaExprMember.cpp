@@ -11,6 +11,7 @@
 //
 //===----------------------------------------------------------------------===//
 #include "clang/Sema/SemaInternal.h"
+#include "clang/AST/ASTLambda.h"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclObjC.h"
 #include "clang/AST/DeclTemplate.h"
@@ -538,13 +539,42 @@ bool Sema::CheckQualifiedMemberReference(Expr *BaseExpr,
 namespace {
 
 // Callback to only accept typo corrections that are either a ValueDecl or a
-// FunctionTemplateDecl.
+// FunctionTemplateDecl and are declared in the current record or, for a C++
+// classes, one of its base classes.
 class RecordMemberExprValidatorCCC : public CorrectionCandidateCallback {
  public:
+  explicit RecordMemberExprValidatorCCC(const RecordType *RTy)
+      : Record(RTy->getDecl()) {}
+
   virtual bool ValidateCandidate(const TypoCorrection &candidate) {
     NamedDecl *ND = candidate.getCorrectionDecl();
-    return ND && (isa<ValueDecl>(ND) || isa<FunctionTemplateDecl>(ND));
+    // Don't accept candidates that cannot be member functions, constants,
+    // variables, or templates.
+    if (!ND || !(isa<ValueDecl>(ND) || isa<FunctionTemplateDecl>(ND)))
+      return false;
+
+    // Accept candidates that occur in the current record.
+    if (Record->containsDecl(ND))
+      return true;
+
+    if (const CXXRecordDecl *RD = dyn_cast<CXXRecordDecl>(Record)) {
+      // Accept candidates that occur in any of the current class' base classes.
+      for (CXXRecordDecl::base_class_const_iterator BS = RD->bases_begin(),
+                                                    BSEnd = RD->bases_end();
+           BS != BSEnd; ++BS) {
+        if (const RecordType *BSTy = dyn_cast_or_null<RecordType>(
+                BS->getType().getTypePtrOrNull())) {
+          if (BSTy->getDecl()->containsDecl(ND))
+            return true;
+        }
+      }
+    }
+
+    return false;
   }
+
+ private:
+  const RecordDecl *const Record;
 };
 
 }
@@ -600,19 +630,12 @@ LookupMemberExprInRecord(Sema &SemaRef, LookupResult &R,
   // We didn't find anything with the given name, so try to correct
   // for typos.
   DeclarationName Name = R.getLookupName();
-  RecordMemberExprValidatorCCC Validator;
+  RecordMemberExprValidatorCCC Validator(RTy);
   TypoCorrection Corrected = SemaRef.CorrectTypo(R.getLookupNameInfo(),
                                                  R.getLookupKind(), NULL,
                                                  &SS, Validator, DC);
   R.clear();
   if (Corrected.isResolved() && !Corrected.isKeyword()) {
-    std::string CorrectedStr(
-        Corrected.getAsString(SemaRef.getLangOpts()));
-    std::string CorrectedQuotedStr(
-        Corrected.getQuoted(SemaRef.getLangOpts()));
-    bool droppedSpecifier =
-        Corrected.WillReplaceSpecifier() && Name.getAsString() == CorrectedStr;
-
     R.setLookupName(Corrected.getCorrection());
     for (TypoCorrection::decl_iterator DI = Corrected.begin(),
                                        DIEnd = Corrected.end();
@@ -621,19 +644,17 @@ LookupMemberExprInRecord(Sema &SemaRef, LookupResult &R,
     }
     R.resolveKind();
 
-    SemaRef.Diag(R.getNameLoc(), diag::err_no_member_suggest)
-      << Name << DC << droppedSpecifier << CorrectedQuotedStr << SS.getRange()
-      << FixItHint::CreateReplacement(Corrected.getCorrectionRange(),
-                                      CorrectedStr);
-
     // If we're typo-correcting to an overloaded name, we don't yet have enough
     // information to do overload resolution, so we don't know which previous
     // declaration to point to.
-    if (!Corrected.isOverloaded()) {
-      NamedDecl *ND = Corrected.getCorrectionDecl();
-      SemaRef.Diag(ND->getLocation(), diag::note_previous_decl)
-        << ND->getDeclName();
-    }
+    if (Corrected.isOverloaded())
+      Corrected.setCorrectionDecl(0);
+    bool DroppedSpecifier =
+        Corrected.WillReplaceSpecifier() &&
+        Name.getAsString() == Corrected.getAsString(SemaRef.getLangOpts());
+    SemaRef.diagnoseTypo(Corrected,
+                         SemaRef.PDiag(diag::err_no_member_suggest)
+                           << Name << DC << DroppedSpecifier << SS.getRange());
   }
 
   return false;
@@ -863,7 +884,54 @@ Sema::BuildMemberReferenceExpr(Expr *BaseExpr, QualType BaseExprType,
     BaseType = BaseType->castAs<PointerType>()->getPointeeType();
   }
   R.setBaseObjectType(BaseType);
-
+  
+  LambdaScopeInfo *const CurLSI = getCurLambda();
+  // If this is an implicit member reference and the overloaded
+  // name refers to both static and non-static member functions
+  // (i.e. BaseExpr is null) and if we are currently processing a lambda, 
+  // check if we should/can capture 'this'...
+  // Keep this example in mind:
+  //  struct X {
+  //   void f(int) { }
+  //   static void f(double) { }
+  // 
+  //   int g() {
+  //     auto L = [=](auto a) { 
+  //       return [](int i) {
+  //         return [=](auto b) {
+  //           f(b); 
+  //           //f(decltype(a){});
+  //         };
+  //       };
+  //     };
+  //     auto M = L(0.0); 
+  //     auto N = M(3);
+  //     N(5.32); // OK, must not error. 
+  //     return 0;
+  //   }
+  //  };
+  //
+  if (!BaseExpr && CurLSI) {
+    SourceLocation Loc = R.getNameLoc();
+    if (SS.getRange().isValid())
+      Loc = SS.getRange().getBegin();    
+    DeclContext *EnclosingFunctionCtx = CurContext->getParent()->getParent();
+    // If the enclosing function is not dependent, then this lambda is 
+    // capture ready, so if we can capture this, do so.
+    if (!EnclosingFunctionCtx->isDependentContext()) {
+      // If the current lambda and all enclosing lambdas can capture 'this' -
+      // then go ahead and capture 'this' (since our unresolved overload set 
+      // contains both static and non-static member functions). 
+      if (!CheckCXXThisCapture(Loc, /*Explcit*/false, /*Diagnose*/false))
+        CheckCXXThisCapture(Loc);
+    } else if (CurContext->isDependentContext()) { 
+      // ... since this is an implicit member reference, that might potentially
+      // involve a 'this' capture, mark 'this' for potential capture in 
+      // enclosing lambdas.
+      if (CurLSI->ImpCaptureStyle != CurLSI->ImpCap_None)
+        CurLSI->addPotentialThisCapture(Loc);
+    }
+  }
   const DeclarationNameInfo &MemberNameInfo = R.getLookupNameInfo();
   DeclarationName MemberName = MemberNameInfo.getName();
   SourceLocation MemberLoc = MemberNameInfo.getLoc();
@@ -1138,6 +1206,11 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
       // overloaded operator->, but that should have been dealt with
       // by now--or a diagnostic message already issued if a problem
       // was encountered while looking for the overloaded operator->.
+      if (!getLangOpts().CPlusPlus) {
+        Diag(OpLoc, diag::err_typecheck_member_reference_suggestion)
+          << BaseType << int(IsArrow) << BaseExpr.get()->getSourceRange()
+          << FixItHint::CreateReplacement(OpLoc, ".");
+      }
       IsArrow = false;
     } else if (BaseType->isFunctionType()) {
       goto fail;
@@ -1207,14 +1280,10 @@ Sema::LookupMemberExpr(LookupResult &R, ExprResult &BaseExpr,
                                                  LookupMemberName, NULL, NULL,
                                                  Validator, IDecl)) {
         IV = Corrected.getCorrectionDeclAs<ObjCIvarDecl>();
-        Diag(R.getNameLoc(),
-             diag::err_typecheck_member_reference_ivar_suggest)
-          << IDecl->getDeclName() << MemberName << IV->getDeclName()
-          << FixItHint::CreateReplacement(R.getNameLoc(),
-                                          IV->getNameAsString());
-        Diag(IV->getLocation(), diag::note_previous_decl)
-          << IV->getDeclName();
-        
+        diagnoseTypo(Corrected,
+                     PDiag(diag::err_typecheck_member_reference_ivar_suggest)
+                          << IDecl->getDeclName() << MemberName);
+
         // Figure out the class that declares the ivar.
         assert(!ClassDeclared);
         Decl *D = cast<Decl>(IV->getDeclContext());

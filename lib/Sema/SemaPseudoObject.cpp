@@ -730,6 +730,16 @@ ExprResult ObjCPropertyOpBuilder::buildSet(Expr *op, SourceLocation opcLoc,
       op = opResult.take();
       assert(op && "successful assignment left argument invalid?");
     }
+    else if (OpaqueValueExpr *OVE = dyn_cast<OpaqueValueExpr>(op)) {
+      Expr *Initializer = OVE->getSourceExpr();
+      // passing C++11 style initialized temporaries to objc++ properties
+      // requires special treatment by removing OpaqueValueExpr so type
+      // conversion takes place and adding the OpaqueValueExpr later on.
+      if (isa<InitListExpr>(Initializer) &&
+          Initializer->getType()->isVoidType()) {
+        op = Initializer;
+      }
+    }
   }
 
   // Arguments.
@@ -1001,8 +1011,6 @@ Sema::ObjCSubscriptKind
   
   // Look for a conversion to an integral, enumeration type, or
   // objective-C pointer type.
-  UnresolvedSet<4> ViableConversions;
-  UnresolvedSet<4> ExplicitConversions;
   std::pair<CXXRecordDecl::conversion_iterator,
             CXXRecordDecl::conversion_iterator> Conversions
     = cast<CXXRecordDecl>(RecordTy->getDecl())->getVisibleConversionFunctions();

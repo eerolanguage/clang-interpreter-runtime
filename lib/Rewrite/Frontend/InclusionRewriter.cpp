@@ -110,11 +110,15 @@ void InclusionRewriter::WriteLineInfo(const char *Filename, int Line,
   if (!ShowLineMarkers)
     return;
   if (UseLineDirective) {
-    OS << "#line" << ' ' << Line << ' ' << '"' << Filename << '"';
+    OS << "#line" << ' ' << Line << ' ' << '"';
+    OS.write_escaped(Filename);
+    OS << '"';
   } else {
     // Use GNU linemarkers as described here:
     // http://gcc.gnu.org/onlinedocs/cpp/Preprocessor-Output.html
-    OS << '#' << ' ' << Line << ' ' << '"' << Filename << '"';
+    OS << '#' << ' ' << Line << ' ' << '"';
+    OS.write_escaped(Filename);
+    OS << '"';
     if (!Extra.empty())
       OS << Extra;
     if (FileType == SrcMgr::C_System)
@@ -338,7 +342,7 @@ bool InclusionRewriter::HandleHasInclude(
   return true;
 }
 
-/// Use a raw lexer to analyze \p FileId, inccrementally copying parts of it
+/// Use a raw lexer to analyze \p FileId, incrementally copying parts of it
 /// and including content of included files recursively.
 bool InclusionRewriter::Process(FileID FileId,
                                 SrcMgr::CharacteristicKind FileType)
@@ -359,8 +363,9 @@ bool InclusionRewriter::Process(FileID FileId,
   if (SM.getFileIDSize(FileId) == 0)
     return false;
 
-  // The next byte to be copied from the source file
-  unsigned NextToWrite = 0;
+  // The next byte to be copied from the source file, which may be non-zero if
+  // the lexer handled a BOM.
+  unsigned NextToWrite = SM.getFileOffset(RawLex.getSourceLocation());
   int Line = 1; // The current input file line number.
 
   Token RawToken;

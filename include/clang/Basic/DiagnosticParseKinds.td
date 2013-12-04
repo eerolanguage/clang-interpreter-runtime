@@ -23,6 +23,8 @@ def err_asm_empty : Error<"__asm used with no assembly instructions">;
 def err_inline_ms_asm_parsing : Error<"%0">;
 def err_msasm_unsupported_arch : Error<
   "Unsupported architecture '%0' for MS-style inline assembly">;
+def err_msasm_unable_to_create_target : Error<
+  "MS-style inline assembly is not available: %0">;
 }
 
 let CategoryName = "Parse Issue" in {
@@ -54,8 +56,11 @@ def warn_duplicate_declspec : Warning<"duplicate '%0' declaration specifier">,
 def ext_plain_complex : ExtWarn<
   "plain '_Complex' requires a type specifier; assuming '_Complex double'">;
 def ext_integer_complex : Extension<
-  "complex integer types are a GNU extension">, InGroup<GNU>;
+  "complex integer types are a GNU extension">, InGroup<GNUComplexInteger>;
 def ext_thread_before : Extension<"'__thread' before '%0'">;
+def ext_keyword_as_ident : ExtWarn<
+  "keyword '%0' will be treated as an identifier %select{here|for the remainder of the translation unit}1">,
+  InGroup<KeywordCompat>;
 
 def error_empty_enum : Error<"use of empty enum">;
 def err_invalid_sign_spec : Error<"'%0' cannot be signed or unsigned">;
@@ -71,8 +76,6 @@ def ext_c99_variable_decl_in_for_loop : Extension<
   "variable declaration in for loop is a C99-specific feature">, InGroup<C99>;
 def ext_c99_compound_literal : Extension<
   "compound literals are a C99-specific feature">, InGroup<C99>;
-def ext_c99_flexible_array_member : Extension<
-  "Flexible array members are a C99-specific feature">, InGroup<C99>;
 def ext_enumerator_list_comma_c : Extension<
   "commas at the end of enumerator lists are a C99-specific "
   "feature">, InGroup<C99>;
@@ -99,7 +102,7 @@ def warn_cxx98_compat_alignof : Warning<
   "alignof expressions are incompatible with C++98">,
   InGroup<CXX98Compat>, DefaultIgnore;
 def ext_alignof_expr : ExtWarn<
-  "%0 applied to an expression is a GNU extension">, InGroup<GNU>;
+  "%0 applied to an expression is a GNU extension">, InGroup<GNUAlignofExpression>;
 
 def warn_microsoft_dependent_exists : Warning<
   "dependent %select{__if_not_exists|__if_exists}0 declarations are ignored">, 
@@ -119,17 +122,15 @@ def ext_c11_noreturn : Extension<
   "_Noreturn functions are a C11-specific feature">, InGroup<C11>;
 
 def ext_gnu_indirect_goto : Extension<
-  "use of GNU indirect-goto extension">, InGroup<GNU>;
+  "use of GNU indirect-goto extension">, InGroup<GNULabelsAsValue>;
 def ext_gnu_address_of_label : Extension<
-  "use of GNU address-of-label extension">, InGroup<GNU>;
-def ext_gnu_local_label : Extension<
-  "use of GNU locally declared label extension">, InGroup<GNU>;
+  "use of GNU address-of-label extension">, InGroup<GNULabelsAsValue>;
 def ext_gnu_statement_expr : Extension<
-  "use of GNU statement expression extension">, InGroup<GNU>;
+  "use of GNU statement expression extension">, InGroup<GNUStatementExpression>;
 def ext_gnu_conditional_expr : Extension<
-  "use of GNU ?: expression extension, eliding middle term">, InGroup<GNU>;
+  "use of GNU ?: conditional expression extension, omitting middle operand">, InGroup<GNUConditionalOmittedOperand>;
 def ext_gnu_empty_initializer : Extension<
-  "use of GNU empty initializer extension">, InGroup<GNU>;
+  "use of GNU empty initializer extension">, InGroup<GNUEmptyInitializer>;
 def ext_gnu_array_range : Extension<"use of GNU array range extension">, 
   InGroup<GNUDesignator>;
 def ext_gnu_missing_equal_designator : ExtWarn<
@@ -140,7 +141,7 @@ def ext_gnu_old_style_field_designator : ExtWarn<
   "use of GNU old-style field designator extension">, 
   InGroup<GNUDesignator>;
 def ext_gnu_case_range : Extension<"use of GNU case range extension">,
-  InGroup<GNU>;
+  InGroup<GNUCaseRange>;
 
 // Generic errors.
 def err_expected_expression : Error<"expected expression">;
@@ -169,10 +170,6 @@ def err_expected_member_name_or_semi : Error<
   "expected member name or ';' after declaration specifiers">;
 def err_function_declared_typedef : Error<
   "function definition declared 'typedef'">;
-def err_iboutletcollection_builtintype : Error<
-  "type argument of iboutletcollection attribute cannot be a builtin type">;
-def err_iboutletcollection_with_protocol : Error<
-  "invalid argument of iboutletcollection attribute">;
 def err_at_defs_cxx : Error<"@defs is not supported in Objective-C++">;
 def err_at_in_class : Error<"unexpected '@' in member specification">;
 
@@ -312,6 +309,8 @@ def err_unspecified_vla_size_with_static : Error<
 def warn_deprecated_register : Warning<
   "'register' storage class specifier is deprecated">,
   InGroup<DeprecatedRegister>;
+def err_expected_parentheses_around_typename : Error<
+  "expected parentheses around type name in %0 expression">;
 
 def err_expected_case_before_expression: Error<
   "expected 'case' keyword before expression">;
@@ -468,6 +467,10 @@ def err_expected_member_or_base_name : Error<
   "expected class member or base class name">;
 def err_expected_lbrace_after_base_specifiers : Error<
   "expected '{' after base class list">;
+def err_missing_end_of_definition : Error<
+  "missing '}' at end of definition of %q0">;
+def note_missing_end_of_definition_before : Note<
+  "still within definition of %q0 here">;
 def ext_ellipsis_exception_spec : Extension<
   "exception specification of '...' is a Microsoft extension">,
   InGroup<Microsoft>;
@@ -482,6 +485,8 @@ def err_expected_rbrace_or_comma : Error<"expected '}' or ','">;
 def err_expected_rsquare_or_comma : Error<"expected ']' or ','">;
 def err_using_namespace_in_class : Error<
   "'using namespace' is not allowed in classes">;
+def err_constructor_bad_name : Error<
+  "missing return type for function %0; did you mean the constructor name %1?">;
 def err_destructor_tilde_identifier : Error<
   "expected a class name after '~' to name a destructor">;
 def err_destructor_template_id : Error<
@@ -573,8 +578,8 @@ def err_class_on_template_template_param : Error<
   "template template parameter requires 'class' after the parameter list">;
 def err_template_spec_syntax_non_template : Error<
   "identifier followed by '<' indicates a class template specialization but "
-  "%0 %select{does not refer to a template|refers to a function "
-  "template|<unused>|refers to a template template parameter}1">;
+  "%0 %select{does not refer to a template|refers to a function template|"
+  "<unused>|refers to a variable template|<unused>}1">;
 def err_id_after_template_in_nested_name_spec : Error<
   "expected template name after 'template' keyword in nested name specifier">;
 def err_two_right_angle_brackets_need_space : Error<
@@ -618,7 +623,7 @@ def warn_cxx98_compat_extern_template : Warning<
   InGroup<CXX98CompatPedantic>, DefaultIgnore;
 def warn_static_inline_explicit_inst_ignored : Warning<
   "ignoring '%select{static|inline}0' keyword on explicit template "
-  "instantiation">;
+  "instantiation">, InGroup<DiagGroup<"static-inline-explicit-instantiation">>;
   
 // Constructor template diagnostics.
 def err_out_of_line_constructor_template_id : Error<
@@ -638,7 +643,7 @@ def err_expected_semi_after_tagdecl : Error<
   "expected ';' after %0">;
 
 def err_typename_refers_to_non_type_template : Error<
-  "typename specifier refers to a non-template">;
+  "typename specifier refers to a non-type template">;
 def err_expected_type_name_after_typename : Error<
   "expected an identifier or template-id after '::'">;
 def err_explicit_spec_non_template : Error<
@@ -702,6 +707,9 @@ def warn_cxx98_compat_override_control_keyword : Warning<
   InGroup<CXX98Compat>, DefaultIgnore;
 def err_override_control_interface : Error<
   "'%0' keyword not permitted with interface types">;
+def ext_ms_sealed_keyword : ExtWarn<
+  "'sealed' keyword is a Microsoft extension">,
+  InGroup<Microsoft>;
 
 def err_access_specifier_interface : Error<
   "interface types cannot specify '%select{private|protected}0' access">;
@@ -745,6 +753,13 @@ def err_zero_version : Error<
   "version number must have non-zero major, minor, or sub-minor version">;
 def err_availability_expected_platform : Error<
   "expected a platform name, e.g., 'macosx'">;
+  
+// objc_bridge_related attribute
+def err_objcbridge_related_expected_related_class : Error<
+  "expected a related ObjectiveC class name, e.g., 'NSColor'">;
+def err_objcbridge_related_selector_name : Error<
+  "expected a class method selector with single argument, e.g., 'colorWithCGColor:'">;
+
 def err_availability_expected_change : Error<
   "expected 'introduced', 'deprecated', or 'obsoleted'">;
 def err_availability_unknown_change : Error<
@@ -792,8 +807,8 @@ def warn_pragma_unused_expected_punc : Warning<
   "expected ')' or ',' in '#pragma unused'">;
 // - #pragma fp_contract
 def err_pragma_fp_contract_scope : Error<
-  "'#pragma fp_contract' should only appear at file scope or at the start of a "
-  "compound expression">; 
+  "'#pragma fp_contract' can only appear at file scope or at the start of a "
+  "compound statement">; 
 // - #pragma comment
 def err_pragma_comment_malformed : Error<
   "pragma comment requires parenthesized identifier and optional string">;

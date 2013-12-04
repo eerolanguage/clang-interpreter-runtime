@@ -631,9 +631,9 @@ public:
   template <class decl_type> friend class RedeclarableTemplate;
 
   /// \brief Retrieves the canonical declaration of this template.
-  RedeclarableTemplateDecl *getCanonicalDecl() { return getFirstDeclaration(); }
-  const RedeclarableTemplateDecl *getCanonicalDecl() const { 
-    return getFirstDeclaration(); 
+  RedeclarableTemplateDecl *getCanonicalDecl() { return getFirstDecl(); }
+  const RedeclarableTemplateDecl *getCanonicalDecl() const {
+    return getFirstDecl();
   }
 
   /// \brief Determines whether this template was a specialization of a
@@ -715,6 +715,7 @@ public:
   using redeclarable_base::redecls_end;
   using redeclarable_base::getPreviousDecl;
   using redeclarable_base::getMostRecentDecl;
+  using redeclarable_base::isFirstDecl;
 
   // Implement isa/cast/dyncast/etc.
   static bool classof(const Decl *D) { return classofKind(D->getKind()); }
@@ -825,14 +826,14 @@ public:
   /// NULL if no such declaration exists.
   FunctionTemplateDecl *getPreviousDecl() {
     return cast_or_null<FunctionTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+             static_cast<RedeclarableTemplateDecl *>(this)->getPreviousDecl());
   }
 
   /// \brief Retrieve the previous declaration of this function template, or
   /// NULL if no such declaration exists.
   const FunctionTemplateDecl *getPreviousDecl() const {
     return cast_or_null<FunctionTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+       static_cast<const RedeclarableTemplateDecl *>(this)->getPreviousDecl());
   }
 
   FunctionTemplateDecl *getInstantiatedFromMemberTemplate() {
@@ -1387,7 +1388,7 @@ class ClassTemplateSpecializationDecl
 
     /// \brief The template argument list deduced for the class template
     /// partial specialization itself.
-    TemplateArgumentList *TemplateArgs;
+    const TemplateArgumentList *TemplateArgs;
   };
 
   /// \brief The template that this specialization specializes
@@ -1412,7 +1413,7 @@ class ClassTemplateSpecializationDecl
   ExplicitSpecializationInfo *ExplicitInfo;
 
   /// \brief The template arguments used to describe this specialization.
-  TemplateArgumentList *TemplateArgs;
+  const TemplateArgumentList *TemplateArgs;
 
   /// \brief The point where this template was instantiated (if any)
   SourceLocation PointOfInstantiation;
@@ -1448,9 +1449,9 @@ public:
                                     bool Qualified) const;
 
   ClassTemplateSpecializationDecl *getMostRecentDecl() {
-    CXXRecordDecl *Recent
-        = cast<CXXRecordDecl>(CXXRecordDecl::getMostRecentDecl());
-    if (!isa<ClassTemplateSpecializationDecl>(Recent)) {
+    CXXRecordDecl *Recent = static_cast<CXXRecordDecl *>(
+                              this)->getMostRecentDecl();
+    while (!isa<ClassTemplateSpecializationDecl>(Recent)) {
       // FIXME: Does injected class name need to be in the redeclarations chain?
       assert(Recent->isInjectedClassName() && Recent->getPreviousDecl());
       Recent = Recent->getPreviousDecl();
@@ -1563,7 +1564,7 @@ public:
   /// instantiation of the given class template partial specialization whose
   /// template arguments have been deduced.
   void setInstantiationOf(ClassTemplatePartialSpecializationDecl *PartialSpec,
-                          TemplateArgumentList *TemplateArgs) {
+                          const TemplateArgumentList *TemplateArgs) {
     assert(!SpecializedTemplate.is<SpecializedPartialSpecialization*>() &&
            "Already set to a class template partial specialization!");
     SpecializedPartialSpecialization *PS
@@ -1651,11 +1652,6 @@ class ClassTemplatePartialSpecializationDecl
   /// FIXME: redundant with TypeAsWritten?
   const ASTTemplateArgumentListInfo *ArgsAsWritten;
 
-  /// \brief Sequence number indicating when this class template partial
-  /// specialization was added to the set of partial specializations for
-  /// its owning class template.
-  unsigned SequenceNumber;
-
   /// \brief The class template partial specialization from which this
   /// class template partial specialization was instantiated.
   ///
@@ -1673,13 +1669,11 @@ class ClassTemplatePartialSpecializationDecl
                                          const TemplateArgument *Args,
                                          unsigned NumArgs,
                                const ASTTemplateArgumentListInfo *ArgsAsWritten,
-                               ClassTemplatePartialSpecializationDecl *PrevDecl,
-                                         unsigned SequenceNumber);
+                               ClassTemplatePartialSpecializationDecl *PrevDecl);
 
   ClassTemplatePartialSpecializationDecl()
     : ClassTemplateSpecializationDecl(ClassTemplatePartialSpecialization),
-      TemplateParams(0), ArgsAsWritten(0), SequenceNumber(0),
-      InstantiatedFromMember(0, false) { }
+      TemplateParams(0), ArgsAsWritten(0), InstantiatedFromMember(0, false) { }
 
 public:
   static ClassTemplatePartialSpecializationDecl *
@@ -1691,15 +1685,15 @@ public:
          unsigned NumArgs,
          const TemplateArgumentListInfo &ArgInfos,
          QualType CanonInjectedType,
-         ClassTemplatePartialSpecializationDecl *PrevDecl,
-         unsigned SequenceNumber);
+         ClassTemplatePartialSpecializationDecl *PrevDecl);
 
   static ClassTemplatePartialSpecializationDecl *
   CreateDeserialized(ASTContext &C, unsigned ID);
 
   ClassTemplatePartialSpecializationDecl *getMostRecentDecl() {
     return cast<ClassTemplatePartialSpecializationDecl>(
-                   ClassTemplateSpecializationDecl::getMostRecentDecl());
+             static_cast<ClassTemplateSpecializationDecl *>(
+               this)->getMostRecentDecl());
   }
 
   /// Get the list of template parameters
@@ -1711,11 +1705,6 @@ public:
   const ASTTemplateArgumentListInfo *getTemplateArgsAsWritten() const {
     return ArgsAsWritten;
   }
-
-  /// \brief Get the sequence number for this class template partial
-  /// specialization. Internal, only valid for specializations which
-  /// are in the specialized class template's folding set.
-  unsigned getSequenceNumber() const { return SequenceNumber; }
 
   /// \brief Retrieve the member class template partial specialization from
   /// which this particular class template partial specialization was
@@ -1738,15 +1727,15 @@ public:
   /// \c Outer<float>::Inner<U*>, this function would return
   /// \c Outer<T>::Inner<U*>.
   ClassTemplatePartialSpecializationDecl *getInstantiatedFromMember() {
-    ClassTemplatePartialSpecializationDecl *First
-      = cast<ClassTemplatePartialSpecializationDecl>(getFirstDeclaration());
+    ClassTemplatePartialSpecializationDecl *First =
+        cast<ClassTemplatePartialSpecializationDecl>(getFirstDecl());
     return First->InstantiatedFromMember.getPointer();
   }
 
   void setInstantiatedFromMember(
                           ClassTemplatePartialSpecializationDecl *PartialSpec) {
-    ClassTemplatePartialSpecializationDecl *First
-      = cast<ClassTemplatePartialSpecializationDecl>(getFirstDeclaration());
+    ClassTemplatePartialSpecializationDecl *First =
+        cast<ClassTemplatePartialSpecializationDecl>(getFirstDecl());
     First->InstantiatedFromMember.setPointer(PartialSpec);
   }
 
@@ -1767,15 +1756,15 @@ public:
   /// struct X<int>::Inner<T*> { /* ... */ };
   /// \endcode
   bool isMemberSpecialization() {
-    ClassTemplatePartialSpecializationDecl *First
-      = cast<ClassTemplatePartialSpecializationDecl>(getFirstDeclaration());
+    ClassTemplatePartialSpecializationDecl *First =
+        cast<ClassTemplatePartialSpecializationDecl>(getFirstDecl());
     return First->InstantiatedFromMember.getInt();
   }
 
   /// \brief Note that this member template is a specialization.
   void setMemberSpecialization() {
-    ClassTemplatePartialSpecializationDecl *First
-      = cast<ClassTemplatePartialSpecializationDecl>(getFirstDeclaration());
+    ClassTemplatePartialSpecializationDecl *First =
+        cast<ClassTemplatePartialSpecializationDecl>(getFirstDecl());
     assert(First->InstantiatedFromMember.getPointer() &&
            "Only member templates can be member template specializations");
     return First->InstantiatedFromMember.setInt(true);
@@ -1903,14 +1892,23 @@ public:
   /// NULL if no such declaration exists.
   ClassTemplateDecl *getPreviousDecl() {
     return cast_or_null<ClassTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+             static_cast<RedeclarableTemplateDecl *>(this)->getPreviousDecl());
   }
 
   /// \brief Retrieve the previous declaration of this class template, or
   /// NULL if no such declaration exists.
   const ClassTemplateDecl *getPreviousDecl() const {
     return cast_or_null<ClassTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+             static_cast<const RedeclarableTemplateDecl *>(
+               this)->getPreviousDecl());
+  }
+
+  ClassTemplateDecl *getMostRecentDecl() {
+    return cast<ClassTemplateDecl>(
+        static_cast<RedeclarableTemplateDecl *>(this)->getMostRecentDecl());
+  }
+  const ClassTemplateDecl *getMostRecentDecl() const {
+    return const_cast<ClassTemplateDecl*>(this)->getMostRecentDecl();
   }
 
   ClassTemplateDecl *getInstantiatedFromMemberTemplate() {
@@ -1928,13 +1926,6 @@ public:
   /// already in. InsertPos must be obtained from findPartialSpecialization.
   void AddPartialSpecialization(ClassTemplatePartialSpecializationDecl *D,
                                 void *InsertPos);
-
-  /// \brief Return the next partial specialization sequence number.
-  unsigned getNextPartialSpecSequenceNumber() {
-    // Do not load lazy specializations here. They get numbered as they are
-    // loaded.
-    return getCommonPtr()->PartialSpecializations.size();
-  }
 
   /// \brief Retrieve the partial specializations as an ordered list.
   void getPartialSpecializations(
@@ -2144,14 +2135,15 @@ public:
   /// NULL if no such declaration exists.
   TypeAliasTemplateDecl *getPreviousDecl() {
     return cast_or_null<TypeAliasTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+             static_cast<RedeclarableTemplateDecl *>(this)->getPreviousDecl());
   }
 
   /// \brief Retrieve the previous declaration of this function template, or
   /// NULL if no such declaration exists.
   const TypeAliasTemplateDecl *getPreviousDecl() const {
     return cast_or_null<TypeAliasTemplateDecl>(
-             RedeclarableTemplateDecl::getPreviousDecl());
+             static_cast<const RedeclarableTemplateDecl *>(
+               this)->getPreviousDecl());
   }
 
   TypeAliasTemplateDecl *getInstantiatedFromMemberTemplate() {
@@ -2222,9 +2214,8 @@ public:
                                                       CXXMethodDecl *FD,
                                                    bool HasExplicitTemplateArgs,
                                         TemplateArgumentListInfo TemplateArgs) {
-    return new (C) ClassScopeFunctionSpecializationDecl(DC , Loc, FD,
-                                                        HasExplicitTemplateArgs,
-                                                        TemplateArgs);
+    return new (C, DC) ClassScopeFunctionSpecializationDecl(
+        DC, Loc, FD, HasExplicitTemplateArgs, TemplateArgs);
   }
 
   static ClassScopeFunctionSpecializationDecl *
@@ -2270,7 +2261,7 @@ class VarTemplateSpecializationDecl : public VarDecl,
 
     /// \brief The template argument list deduced for the variable template
     /// partial specialization itself.
-    TemplateArgumentList *TemplateArgs;
+    const TemplateArgumentList *TemplateArgs;
   };
 
   /// \brief The template that this specialization specializes.
@@ -2295,7 +2286,7 @@ class VarTemplateSpecializationDecl : public VarDecl,
   ExplicitSpecializationInfo *ExplicitInfo;
 
   /// \brief The template arguments used to describe this specialization.
-  TemplateArgumentList *TemplateArgs;
+  const TemplateArgumentList *TemplateArgs;
   TemplateArgumentListInfo TemplateArgsInfo;
 
   /// \brief The point where this template was instantiated (if any).
@@ -2329,7 +2320,7 @@ public:
                                     bool Qualified) const;
 
   VarTemplateSpecializationDecl *getMostRecentDecl() {
-    VarDecl *Recent = cast<VarDecl>(VarDecl::getMostRecentDecl());
+    VarDecl *Recent = static_cast<VarDecl *>(this)->getMostRecentDecl();
     return cast<VarTemplateSpecializationDecl>(Recent);
   }
 
@@ -2441,7 +2432,7 @@ public:
   /// instantiation of the given variable template partial specialization whose
   /// template arguments have been deduced.
   void setInstantiationOf(VarTemplatePartialSpecializationDecl *PartialSpec,
-                          TemplateArgumentList *TemplateArgs) {
+                          const TemplateArgumentList *TemplateArgs) {
     assert(!SpecializedTemplate.is<SpecializedPartialSpecialization *>() &&
            "Already set to a variable template partial specialization!");
     SpecializedPartialSpecialization *PS =
@@ -2527,11 +2518,6 @@ class VarTemplatePartialSpecializationDecl
   /// FIXME: redundant with TypeAsWritten?
   const ASTTemplateArgumentListInfo *ArgsAsWritten;
 
-  /// \brief Sequence number indicating when this variable template partial
-  /// specialization was added to the set of partial specializations for
-  /// its owning variable template.
-  unsigned SequenceNumber;
-
   /// \brief The variable template partial specialization from which this
   /// variable template partial specialization was instantiated.
   ///
@@ -2545,13 +2531,11 @@ class VarTemplatePartialSpecializationDecl
       SourceLocation IdLoc, TemplateParameterList *Params,
       VarTemplateDecl *SpecializedTemplate, QualType T, TypeSourceInfo *TInfo,
       StorageClass S, const TemplateArgument *Args, unsigned NumArgs,
-      const ASTTemplateArgumentListInfo *ArgInfos,
-      unsigned SequenceNumber);
+      const ASTTemplateArgumentListInfo *ArgInfos);
 
   VarTemplatePartialSpecializationDecl()
       : VarTemplateSpecializationDecl(VarTemplatePartialSpecialization),
-        TemplateParams(0), ArgsAsWritten(0),
-        SequenceNumber(0), InstantiatedFromMember(0, false) {}
+        TemplateParams(0), ArgsAsWritten(0), InstantiatedFromMember(0, false) {}
 
 public:
   static VarTemplatePartialSpecializationDecl *
@@ -2559,15 +2543,15 @@ public:
          SourceLocation IdLoc, TemplateParameterList *Params,
          VarTemplateDecl *SpecializedTemplate, QualType T,
          TypeSourceInfo *TInfo, StorageClass S, const TemplateArgument *Args,
-         unsigned NumArgs, const TemplateArgumentListInfo &ArgInfos,
-         unsigned SequenceNumber);
+         unsigned NumArgs, const TemplateArgumentListInfo &ArgInfos);
 
   static VarTemplatePartialSpecializationDecl *CreateDeserialized(ASTContext &C,
                                                                   unsigned ID);
 
   VarTemplatePartialSpecializationDecl *getMostRecentDecl() {
     return cast<VarTemplatePartialSpecializationDecl>(
-        VarTemplateSpecializationDecl::getMostRecentDecl());
+             static_cast<VarTemplateSpecializationDecl *>(
+               this)->getMostRecentDecl());
   }
 
   /// Get the list of template parameters
@@ -2579,10 +2563,6 @@ public:
   const ASTTemplateArgumentListInfo *getTemplateArgsAsWritten() const {
     return ArgsAsWritten;
   }
-
-  /// \brief Get the sequence number for this variable template partial
-  /// specialization.
-  unsigned getSequenceNumber() const { return SequenceNumber; }
 
   /// \brief Retrieve the member variable template partial specialization from
   /// which this particular variable template partial specialization was
@@ -2606,14 +2586,14 @@ public:
   /// \c Outer<T>::Inner<U*>.
   VarTemplatePartialSpecializationDecl *getInstantiatedFromMember() {
     VarTemplatePartialSpecializationDecl *First =
-        cast<VarTemplatePartialSpecializationDecl>(getFirstDeclaration());
+        cast<VarTemplatePartialSpecializationDecl>(getFirstDecl());
     return First->InstantiatedFromMember.getPointer();
   }
 
   void
   setInstantiatedFromMember(VarTemplatePartialSpecializationDecl *PartialSpec) {
     VarTemplatePartialSpecializationDecl *First =
-        cast<VarTemplatePartialSpecializationDecl>(getFirstDeclaration());
+        cast<VarTemplatePartialSpecializationDecl>(getFirstDecl());
     First->InstantiatedFromMember.setPointer(PartialSpec);
   }
 
@@ -2635,14 +2615,14 @@ public:
   /// \endcode
   bool isMemberSpecialization() {
     VarTemplatePartialSpecializationDecl *First =
-        cast<VarTemplatePartialSpecializationDecl>(getFirstDeclaration());
+        cast<VarTemplatePartialSpecializationDecl>(getFirstDecl());
     return First->InstantiatedFromMember.getInt();
   }
 
   /// \brief Note that this member template is a specialization.
   void setMemberSpecialization() {
     VarTemplatePartialSpecializationDecl *First =
-        cast<VarTemplatePartialSpecializationDecl>(getFirstDeclaration());
+        cast<VarTemplatePartialSpecializationDecl>(getFirstDecl());
     assert(First->InstantiatedFromMember.getPointer() &&
            "Only member templates can be member template specializations");
     return First->InstantiatedFromMember.setInt(true);
@@ -2754,14 +2734,15 @@ public:
   /// NULL if no such declaration exists.
   VarTemplateDecl *getPreviousDecl() {
     return cast_or_null<VarTemplateDecl>(
-        RedeclarableTemplateDecl::getPreviousDecl());
+        static_cast<RedeclarableTemplateDecl *>(this)->getPreviousDecl());
   }
 
   /// \brief Retrieve the previous declaration of this variable template, or
   /// NULL if no such declaration exists.
   const VarTemplateDecl *getPreviousDecl() const {
     return cast_or_null<VarTemplateDecl>(
-        RedeclarableTemplateDecl::getPreviousDecl());
+            static_cast<const RedeclarableTemplateDecl *>(
+              this)->getPreviousDecl());
   }
 
   VarTemplateDecl *getInstantiatedFromMemberTemplate() {
@@ -2779,11 +2760,6 @@ public:
   /// already in. InsertPos must be obtained from findPartialSpecialization.
   void AddPartialSpecialization(VarTemplatePartialSpecializationDecl *D,
                                 void *InsertPos);
-
-  /// \brief Return the next partial specialization sequence number.
-  unsigned getNextPartialSpecSequenceNumber() {
-    return getPartialSpecializations().size();
-  }
 
   /// \brief Retrieve the partial specializations as an ordered list.
   void getPartialSpecializations(

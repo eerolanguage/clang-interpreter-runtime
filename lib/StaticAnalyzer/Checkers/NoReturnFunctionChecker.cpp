@@ -37,7 +37,6 @@ public:
 
 void NoReturnFunctionChecker::checkPostCall(const CallEvent &CE,
                                             CheckerContext &C) const {
-  ProgramStateRef state = C.getState();
   bool BuildSinks = false;
 
   if (const FunctionDecl *FD = dyn_cast_or_null<FunctionDecl>(CE.getDecl()))
@@ -64,6 +63,9 @@ void NoReturnFunctionChecker::checkPostCall(const CallEvent &CE,
             .Case("assfail", true)
             .Case("db_error", true)
             .Case("__assert", true)
+            // For the purpose of static analysis, we do not care that
+            //  this MSVC function will return if the user decides to continue.
+            .Case("_wassert", true)
             .Case("__assert_rtn", true)
             .Case("__assert_fail", true)
             .Case("dtrace_assfail", true)

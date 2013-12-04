@@ -57,7 +57,7 @@ Driver::Driver(StringRef ClangExecutable,
     CCPrintOptionsFilename(0), CCPrintHeadersFilename(0),
     CCLogDiagnosticsFilename(0),
     CCCPrintBindings(false),
-    CCPrintOptions(false), CCPrintHeaders(false), CCLogDiagnostics(false),
+    CCPrintHeaders(false), CCLogDiagnostics(false),
     CCGenDiagnostics(false), CCCGenericGCCName(""), CheckInputsExist(true),
     CCCUsePCH(true), SuppressMissingInputWarning(false) {
 
@@ -143,6 +143,11 @@ InputArgList *Driver::ParseArgStrings(ArrayRef<const char *> ArgList) {
     }
   }
 
+  for (arg_iterator it = Args->filtered_begin(options::OPT_UNKNOWN),
+         ie = Args->filtered_end(); it != ie; ++it) {
+    Diags.Report(diag::err_drv_unknown_argument) << (*it) ->getAsString(*Args);
+  }
+
   return Args;
 }
 
@@ -184,6 +189,14 @@ const {
     *FinalPhaseArg = PhaseArg;
 
   return FinalPhase;
+}
+
+static Arg* MakeInputArg(const DerivedArgList &Args, OptTable *Opts,
+                         StringRef Value) {
+  Arg *A = new Arg(Opts->getOption(options::OPT_INPUT), Value,
+                   Args.getBaseArgs().MakeIndex(Value), Value.data());
+  A->claim();
+  return A;
 }
 
 DerivedArgList *Driver::TranslateInputArgs(const InputArgList &Args) const {
@@ -251,6 +264,14 @@ DerivedArgList *Driver::TranslateInputArgs(const InputArgList &Args) const {
       }
     }
 
+    // Pick up inputs via the -- option.
+    if (A->getOption().matches(options::OPT__DASH_DASH)) {
+      A->claim();
+      for (unsigned i = 0, e = A->getNumValues(); i != e; ++i)
+        DAL->append(MakeInputArg(*DAL, Opts, A->getValue(i)));
+      continue;
+    }
+
     DAL->append(*it);
   }
 
@@ -265,26 +286,6 @@ DerivedArgList *Driver::TranslateInputArgs(const InputArgList &Args) const {
 #endif
 
   return DAL;
-}
-
-/// \brief Check whether there are multiple instances of OptionID in Args, and
-/// if so, issue a diagnostics about it.
-static void DiagnoseOptionOverride(const Driver &D, const DerivedArgList &Args,
-                                   unsigned OptionID) {
-  assert(Args.hasArg(OptionID));
-
-  arg_iterator it = Args.filtered_begin(OptionID);
-  arg_iterator ie = Args.filtered_end();
-  Arg *Previous = *it;
-  ++it;
-
-  while (it != ie) {
-    D.Diag(clang::diag::warn_drv_overriding_joined_option)
-        << Previous->getSpelling() << Previous->getValue()
-        << (*it)->getSpelling() << (*it)->getValue();
-    Previous = *it;
-    ++it;
-  }
 }
 
 Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
@@ -310,7 +311,7 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
   // FIXME: What are we going to do with -V and -b?
 
   // FIXME: This stuff needs to go into the Compilation, not the driver.
-  bool CCCPrintOptions, CCCPrintActions;
+  bool CCCPrintActions;
 
   InputArgList *Args = ParseArgStrings(ArgList.slice(1));
 
@@ -326,7 +327,6 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
   // should be outside in the client; the parts that aren't should have proper
   // options, either by introducing new ones or by overloading gcc ones like -V
   // or -b.
-  CCCPrintOptions = Args->hasArg(options::OPT_ccc_print_options);
   CCCPrintActions = Args->hasArg(options::OPT_ccc_print_phases);
   CCCPrintBindings = Args->hasArg(options::OPT_ccc_print_bindings);
   if (const Arg *A = Args->getLastArg(options::OPT_ccc_gcc_name))
@@ -335,6 +335,12 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
                             options::OPT_ccc_pch_is_pth);
   // FIXME: DefaultTargetTriple is used by the target-prefixed calls to as/ld
   // and getToolChain is const.
+  if (IsCLMode()) {
+    // clang-cl targets Win32.
+    llvm::Triple T(DefaultTargetTriple);
+    T.setOSName(llvm::Triple::getOSTypeName(llvm::Triple::Win32));
+    DefaultTargetTriple = T.str();
+  }
   if (const Arg *A = Args->getLastArg(options::OPT_target))
     DefaultTargetTriple = A->getValue();
   if (const Arg *A = Args->getLastArg(options::OPT_ccc_install_dir))
@@ -364,18 +370,12 @@ Compilation *Driver::BuildCompilation(ArrayRef<const char *> ArgList) {
   // The compilation takes ownership of Args.
   Compilation *C = new Compilation(*this, TC, Args, TranslatedArgs);
 
-  // FIXME: This behavior shouldn't be here.
-  if (CCCPrintOptions) {
-    PrintOptions(C->getInputArgs());
-    return C;
-  }
-
   if (!HandleImmediateArgs(*C))
     return C;
 
   // Construct the list of inputs.
   InputList Inputs;
-  BuildInputs(C->getDefaultToolChain(), C->getArgs(), Inputs);
+  BuildInputs(C->getDefaultToolChain(), *TranslatedArgs, Inputs);
 
   // Construct the list of abstract actions to perform for this compilation. On
   // Darwin target OSes this uses the driver-driver and universal actions.
@@ -425,11 +425,11 @@ void Driver::generateCompilationDiagnostics(Compilation &C,
   std::string Cmd;
   llvm::raw_string_ostream OS(Cmd);
   if (FailingCommand)
-    C.PrintDiagnosticJob(OS, *FailingCommand);
+    FailingCommand->Print(OS, "\n", /*Quote*/ false, /*CrashReport*/ true);
   else
     // Crash triggered by FORCE_CLANG_DIAGNOSTICS_CRASH, which doesn't have an
     // associated FailingCommand, so just pass all jobs.
-    C.PrintDiagnosticJob(OS, C.getJobs());
+    C.getJobs().Print(OS, "\n", /*Quote*/ false, /*CrashReport*/ true);
   OS.flush();
 
   // Keep track of whether we produce any errors while trying to produce
@@ -562,7 +562,7 @@ int Driver::ExecuteCompilation(const Compilation &C,
     SmallVectorImpl< std::pair<int, const Command *> > &FailingCommands) const {
   // Just print if -### was present.
   if (C.getArgs().hasArg(options::OPT__HASH_HASH_HASH)) {
-    C.PrintJob(llvm::errs(), C.getJobs(), "\n", true);
+    C.getJobs().Print(llvm::errs(), "\n", true);
     return 0;
   }
 
@@ -616,23 +616,6 @@ int Driver::ExecuteCompilation(const Compilation &C,
     }
   }
   return 0;
-}
-
-void Driver::PrintOptions(const ArgList &Args) const {
-  unsigned i = 0;
-  for (ArgList::const_iterator it = Args.begin(), ie = Args.end();
-       it != ie; ++it, ++i) {
-    Arg *A = *it;
-    llvm::errs() << "Option " << i << " - "
-                 << "Name: \"" << A->getOption().getPrefixedName() << "\", "
-                 << "Values: {";
-    for (unsigned j = 0; j < A->getNumValues(); ++j) {
-      if (j)
-        llvm::errs() << ", ";
-      llvm::errs() << '"' << A->getValue(j) << '"';
-    }
-    llvm::errs() << "}\n";
-  }
 }
 
 void Driver::PrintHelp(bool ShowHidden) const {
@@ -965,7 +948,7 @@ void Driver::BuildUniversalActions(const ToolChain &TC,
 
 /// \brief Check that the file referenced by Value exists. If it doesn't,
 /// issue a diagnostic and return false.
-static bool DiagnoseInputExistance(const Driver &D, const DerivedArgList &Args,
+static bool DiagnoseInputExistence(const Driver &D, const DerivedArgList &Args,
                                    StringRef Value) {
   if (!D.getCheckInputsExist())
     return true;
@@ -990,14 +973,6 @@ static bool DiagnoseInputExistance(const Driver &D, const DerivedArgList &Args,
   return false;
 }
 
-static Arg* MakeInputArg(const DerivedArgList &Args, OptTable *Opts,
-                         StringRef Value) {
-  unsigned Index = Args.getBaseArgs().MakeIndex(Value);
-  Arg *A = Opts->ParseOneArg(Args, Index);
-  A->claim();
-  return A;
-}
-
 // Construct a the list of inputs and their types.
 void Driver::BuildInputs(const ToolChain &TC, const DerivedArgList &Args,
                          InputList &Inputs) const {
@@ -1020,8 +995,8 @@ void Driver::BuildInputs(const ToolChain &TC, const DerivedArgList &Args,
     Arg *Previous = *it++;
     bool ShowNote = false;
     while (it != ie) {
-      Diag(clang::diag::warn_drv_overriding_t_option) << Previous->getSpelling()
-          << (*it)->getSpelling();
+      Diag(clang::diag::warn_drv_overriding_flag_option)
+          << Previous->getSpelling() << (*it)->getSpelling();
       Previous = *it++;
       ShowNote = true;
     }
@@ -1100,19 +1075,19 @@ void Driver::BuildInputs(const ToolChain &TC, const DerivedArgList &Args,
         Ty = InputType;
       }
 
-      if (DiagnoseInputExistance(*this, Args, Value))
+      if (DiagnoseInputExistence(*this, Args, Value))
         Inputs.push_back(std::make_pair(Ty, A));
 
     } else if (A->getOption().matches(options::OPT__SLASH_Tc)) {
       StringRef Value = A->getValue();
-      if (DiagnoseInputExistance(*this, Args, Value)) {
+      if (DiagnoseInputExistence(*this, Args, Value)) {
         Arg *InputArg = MakeInputArg(Args, Opts, A->getValue());
         Inputs.push_back(std::make_pair(types::TY_C, InputArg));
       }
       A->claim();
     } else if (A->getOption().matches(options::OPT__SLASH_Tp)) {
       StringRef Value = A->getValue();
-      if (DiagnoseInputExistance(*this, Args, Value)) {
+      if (DiagnoseInputExistence(*this, Args, Value)) {
         Arg *InputArg = MakeInputArg(Args, Opts, A->getValue());
         Inputs.push_back(std::make_pair(types::TY_CXX, InputArg));
       }
@@ -1156,6 +1131,10 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
   Arg *FinalPhaseArg;
   phases::ID FinalPhase = getFinalPhase(Args, &FinalPhaseArg);
 
+  if (FinalPhase == phases::Link && Args.hasArg(options::OPT_emit_llvm)) {
+    Diag(clang::diag::err_drv_emit_llvm_link);
+  }
+
   // Reject -Z* at the top level, these options should never have been exposed
   // by gcc.
   if (Arg *A = Args.getLastArg(options::OPT_Z_Joined))
@@ -1163,7 +1142,6 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
 
   // Diagnose misuse of /Fo.
   if (Arg *A = Args.getLastArg(options::OPT__SLASH_Fo)) {
-    DiagnoseOptionOverride(*this, Args, options::OPT__SLASH_Fo);
     StringRef V = A->getValue();
     if (V.empty()) {
       // It has to have a value.
@@ -1171,15 +1149,25 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
       Args.eraseArg(options::OPT__SLASH_Fo);
     } else if (Inputs.size() > 1 && !llvm::sys::path::is_separator(V.back())) {
       // Check whether /Fo tries to name an output file for multiple inputs.
-      Diag(clang::diag::err_drv_obj_file_argument_with_multiple_sources)
+      Diag(clang::diag::err_drv_out_file_argument_with_multiple_sources)
         << A->getSpelling() << V;
       Args.eraseArg(options::OPT__SLASH_Fo);
     }
   }
 
+  // Diagnose misuse of /Fa.
+  if (Arg *A = Args.getLastArg(options::OPT__SLASH_Fa)) {
+    StringRef V = A->getValue();
+    if (Inputs.size() > 1 && !llvm::sys::path::is_separator(V.back())) {
+      // Check whether /Fa tries to name an asm file for multiple inputs.
+      Diag(clang::diag::err_drv_out_file_argument_with_multiple_sources)
+        << A->getSpelling() << V;
+      Args.eraseArg(options::OPT__SLASH_Fa);
+    }
+  }
+
   // Diagnose misuse of /Fe.
   if (Arg *A = Args.getLastArg(options::OPT__SLASH_Fe)) {
-    DiagnoseOptionOverride(*this, Args, options::OPT__SLASH_Fe);
     if (A->getValue()[0] == '\0') {
       // It has to have a value.
       Diag(clang::diag::err_drv_missing_argument) << A->getSpelling() << 1;
@@ -1189,7 +1177,7 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
 
   // Construct the actions to perform.
   ActionList LinkerInputs;
-  ActionList SplitInputs;
+
   llvm::SmallVector<phases::ID, phases::MaxNumberOfPhases> PL;
   for (unsigned i = 0, e = Inputs.size(); i != e; ++i) {
     types::ID InputType = Inputs[i].first;
@@ -1273,8 +1261,13 @@ void Driver::BuildActions(const ToolChain &TC, DerivedArgList &Args,
 
   // If we are linking, claim any options which are obviously only used for
   // compilation.
-  if (FinalPhase == phases::Link && PL.size() == 1)
+  if (FinalPhase == phases::Link && PL.size() == 1) {
     Args.ClaimAllArgs(options::OPT_CompileOnly_Group);
+    Args.ClaimAllArgs(options::OPT_cl_compile_Group);
+  }
+
+  // Claim ignored clang-cl options.
+  Args.ClaimAllArgs(options::OPT_cl_ignored_Group);
 }
 
 Action *Driver::ConstructPhaseAction(const ArgList &Args, phases::ID Phase,
@@ -1325,6 +1318,10 @@ Action *Driver::ConstructPhaseAction(const ArgList &Args, phases::ID Phase,
       types::ID Output =
         Args.hasArg(options::OPT_S) ? types::TY_LTO_IR : types::TY_LTO_BC;
       return new CompileJobAction(Input, Output);
+    } else if (Args.hasArg(options::OPT_emit_llvm)) {
+      types::ID Output =
+        Args.hasArg(options::OPT_S) ? types::TY_LLVM_IR : types::TY_LLVM_BC;
+      return new CompileJobAction(Input, Output);
     } else {
       return new CompileJobAction(Input, types::TY_PP_Asm);
     }
@@ -1337,14 +1334,8 @@ Action *Driver::ConstructPhaseAction(const ArgList &Args, phases::ID Phase,
 }
 
 bool Driver::IsUsingLTO(const ArgList &Args) const {
-  // Check for -emit-llvm or -flto.
-  if (Args.hasArg(options::OPT_emit_llvm) ||
-      Args.hasFlag(options::OPT_flto, options::OPT_fno_lto, false))
+  if (Args.hasFlag(options::OPT_flto, options::OPT_fno_lto, false))
     return true;
-
-  // Check for -O4.
-  if (const Arg *A = Args.getLastArg(options::OPT_O_Group))
-      return A->getOption().matches(options::OPT_O4);
 
   return false;
 }
@@ -1465,6 +1456,8 @@ static const Tool *SelectToolForJob(Compilation &C, const ToolChain *TC,
 
   if (TC->useIntegratedAs() &&
       !C.getArgs().hasArg(options::OPT_save_temps) &&
+      !C.getArgs().hasArg(options::OPT__SLASH_FA) &&
+      !C.getArgs().hasArg(options::OPT__SLASH_Fa) &&
       isa<AssembleJobAction>(JA) &&
       Inputs->size() == 1 && isa<CompileJobAction>(*Inputs->begin())) {
     const Tool *Compiler =
@@ -1587,14 +1580,18 @@ void Driver::BuildJobsForAction(Compilation &C,
   }
 }
 
-/// \brief Create output filename based on ArgValue, which could either be a 
-/// full filename, filename without extension, or a directory.
+/// \brief Create output filename based on ArgValue, which could either be a
+/// full filename, filename without extension, or a directory. If ArgValue
+/// does not provide a filename, then use BaseName, and use the extension
+/// suitable for FileType.
 static const char *MakeCLOutputFilename(const ArgList &Args, StringRef ArgValue,
                                         StringRef BaseName, types::ID FileType) {
   SmallString<128> Filename = ArgValue;
-  assert(!ArgValue.empty() && "Output filename argument must not be empty.");
   
-  if (llvm::sys::path::is_separator(Filename.back())) {
+  if (ArgValue.empty()) {
+    // If the argument is empty, output to BaseName in the current dir.
+    Filename = BaseName;
+  } else if (llvm::sys::path::is_separator(Filename.back())) {
     // If the argument is a directory, output to BaseName in that dir.
     llvm::sys::path::append(Filename, BaseName);
   }
@@ -1602,6 +1599,13 @@ static const char *MakeCLOutputFilename(const ArgList &Args, StringRef ArgValue,
   if (!llvm::sys::path::has_extension(ArgValue)) {
     // If the argument didn't provide an extension, then set it.
     const char *Extension = types::getTypeTempSuffix(FileType, true);
+
+    if (FileType == types::TY_Image &&
+        Args.hasArg(options::OPT__SLASH_LD, options::OPT__SLASH_LDd)) {
+      // The output file is a dll.
+      Extension = "dll";
+    }
+
     llvm::sys::path::replace_extension(Filename, Extension);
   }
 
@@ -1626,6 +1630,17 @@ const char *Driver::GetNamedOutputPath(Compilation &C,
   if (AtTopLevel && !CCGenDiagnostics &&
       (isa<PreprocessJobAction>(JA) || JA.getType() == types::TY_ModuleFile))
     return "-";
+
+  // Is this the assembly listing for /FA?
+  if (JA.getType() == types::TY_PP_Asm &&
+      (C.getArgs().hasArg(options::OPT__SLASH_FA) ||
+       C.getArgs().hasArg(options::OPT__SLASH_Fa))) {
+    // Use /Fa and the input filename to determine the asm file name.
+    StringRef BaseName = llvm::sys::path::filename(BaseInput);
+    StringRef FaValue = C.getArgs().getLastArgValue(options::OPT__SLASH_Fa);
+    return C.addResultFile(MakeCLOutputFilename(C.getArgs(), FaValue, BaseName,
+                                                JA.getType()), &JA);
+  }
 
   // Output to a temporary file?
   if ((!AtTopLevel && !C.getArgs().hasArg(options::OPT_save_temps) &&
@@ -1663,12 +1678,11 @@ const char *Driver::GetNamedOutputPath(Compilation &C,
     StringRef Val = C.getArgs().getLastArg(options::OPT__SLASH_Fe)->getValue();
     NamedOutput = MakeCLOutputFilename(C.getArgs(), Val, BaseName,
                                        types::TY_Image);
-  } else if (JA.getType() == types::TY_Image) {    
+  } else if (JA.getType() == types::TY_Image) {
     if (IsCLMode()) {
       // clang-cl uses BaseName for the executable name.
-      SmallString<128> Filename = BaseName;
-      llvm::sys::path::replace_extension(Filename, "exe");
-      NamedOutput = C.getArgs().MakeArgString(Filename.c_str());
+      NamedOutput = MakeCLOutputFilename(C.getArgs(), "", BaseName,
+                                         types::TY_Image);
     } else if (MultipleArchs && BoundArch) {
       SmallString<128> Output(DefaultImageName.c_str());
       Output += "-";
@@ -1677,7 +1691,7 @@ const char *Driver::GetNamedOutputPath(Compilation &C,
     } else
       NamedOutput = DefaultImageName.c_str();
   } else {
-    const char *Suffix = types::getTypeTempSuffix(JA.getType());
+    const char *Suffix = types::getTypeTempSuffix(JA.getType(), IsCLMode());
     assert(Suffix && "All types used for output should have a suffix.");
 
     std::string::size_type End = std::string::npos;
@@ -1912,13 +1926,7 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
     case llvm::Triple::Darwin:
     case llvm::Triple::MacOSX:
     case llvm::Triple::IOS:
-      if (Target.getArch() == llvm::Triple::x86 ||
-          Target.getArch() == llvm::Triple::x86_64 ||
-          Target.getArch() == llvm::Triple::arm ||
-          Target.getArch() == llvm::Triple::thumb)
-        TC = new toolchains::DarwinClang(*this, Target, Args);
-      else
-        TC = new toolchains::Darwin_Generic_GCC(*this, Target, Args);
+      TC = new toolchains::DarwinClang(*this, Target, Args);
       break;
     case llvm::Triple::DragonFly:
       TC = new toolchains::DragonFly(*this, Target, Args);
@@ -1961,6 +1969,10 @@ const ToolChain &Driver::getToolChain(const ArgList &Args,
       // If Hexagon is configured as an OSless target
       if (Target.getArch() == llvm::Triple::hexagon) {
         TC = new toolchains::Hexagon_TC(*this, Target, Args);
+        break;
+      }
+      if (Target.getArch() == llvm::Triple::xcore) {
+        TC = new toolchains::XCore(*this, Target, Args);
         break;
       }
       TC = new toolchains::Generic_GCC(*this, Target, Args);
@@ -2025,7 +2037,7 @@ bool Driver::GetReleaseVersion(const char *Str, unsigned &Major,
 
 std::pair<unsigned, unsigned> Driver::getIncludeExcludeOptionFlagMasks() const {
   unsigned IncludedFlagsBitmask = 0;
-  unsigned ExcludedFlagsBitmask = 0;
+  unsigned ExcludedFlagsBitmask = options::NoDriverOption;
 
   if (Mode == CLMode) {
     // Include CL and Core options.

@@ -17,10 +17,12 @@
 #include "CodeGenFunction.h"
 #include "CGCXXABI.h"
 #include "clang/AST/CXXInheritance.h"
+#include "clang/AST/DeclTemplate.h"
 #include "clang/AST/EvaluatedExprVisitor.h"
 #include "clang/AST/RecordLayout.h"
 #include "clang/AST/StmtCXX.h"
 #include "clang/Basic/TargetBuiltins.h"
+#include "clang/CodeGen/CGFunctionInfo.h"
 #include "clang/Frontend/CodeGenOptions.h"
 
 using namespace clang;
@@ -703,7 +705,7 @@ void CodeGenFunction::EmitConstructorBody(FunctionArgList &Args) {
       CGM.getTarget().getCXXABI().hasConstructorVariants()) {
     if (CGDebugInfo *DI = getDebugInfo()) 
       DI->EmitLocation(Builder, Ctor->getLocEnd());
-    EmitDelegateCXXConstructorCall(Ctor, Ctor_Base, Args);
+    EmitDelegateCXXConstructorCall(Ctor, Ctor_Base, Args, Ctor->getLocEnd());
     return;
   }
 
@@ -738,6 +740,29 @@ void CodeGenFunction::EmitConstructorBody(FunctionArgList &Args) {
 
   if (IsTryBody)
     ExitCXXTryStmt(*cast<CXXTryStmt>(Body), true);
+}
+
+namespace {
+  /// RAII object to indicate that codegen is copying the value representation
+  /// instead of the object representation. Useful when copying a struct or
+  /// class which has uninitialized members and we're only performing
+  /// lvalue-to-rvalue conversion on the object but not its members.
+  class CopyingValueRepresentation {
+  public:
+    explicit CopyingValueRepresentation(CodeGenFunction &CGF)
+        : CGF(CGF), SO(*CGF.SanOpts), OldSanOpts(CGF.SanOpts) {
+      SO.Bool = false;
+      SO.Enum = false;
+      CGF.SanOpts = &SO;
+    }
+    ~CopyingValueRepresentation() {
+      CGF.SanOpts = OldSanOpts;
+    }
+  private:
+    CodeGenFunction &CGF;
+    SanitizerOptions SO;
+    const SanitizerOptions *OldSanOpts;
+  };
 }
 
 namespace {
@@ -939,9 +964,10 @@ namespace {
       if (AggregatedInits.size() <= 1) {
         // This memcpy is too small to be worthwhile. Fall back on default
         // codegen.
-        for (unsigned i = 0; i < AggregatedInits.size(); ++i) {
+        if (!AggregatedInits.empty()) {
+          CopyingValueRepresentation CVR(CGF);
           EmitMemberInitializer(CGF, ConstructorDecl->getParent(),
-                                AggregatedInits[i], ConstructorDecl, Args);
+                                AggregatedInits[0], ConstructorDecl, Args);
         }
         reset();
         return;
@@ -980,8 +1006,8 @@ namespace {
   private:
 
     // Returns the memcpyable field copied by the given statement, if one
-    // exists. Otherwise r
-    FieldDecl* getMemcpyableField(Stmt *S) {
+    // exists. Otherwise returns null.
+    FieldDecl *getMemcpyableField(Stmt *S) {
       if (!AssignmentsMemcpyable)
         return 0;
       if (BinaryOperator *BO = dyn_cast<BinaryOperator>(S)) {
@@ -1075,8 +1101,10 @@ namespace {
 
     void emitAggregatedStmts() {
       if (AggregatedStmts.size() <= 1) {
-        for (unsigned i = 0; i < AggregatedStmts.size(); ++i)
-          CGF.EmitStmt(AggregatedStmts[i]);
+        if (!AggregatedStmts.empty()) {
+          CopyingValueRepresentation CVR(CGF);
+          CGF.EmitStmt(AggregatedStmts[0]);
+        }
         reset();
       }
 
@@ -1476,7 +1504,6 @@ void CodeGenFunction::EnterDtorCleanups(const CXXDestructorDecl *DD,
   }
 
   // Destroy direct fields.
-  SmallVector<const FieldDecl *, 16> FieldDecls;
   for (CXXRecordDecl::field_iterator I = ClassDecl->field_begin(),
        E = ClassDecl->field_end(); I != E; ++I) {
     const FieldDecl *field = *I;
@@ -1672,43 +1699,27 @@ CodeGenFunction::EmitSynthesizedCXXCopyCtorCall(const CXXConstructorDecl *D,
     EmitAggregateCopy(This, Src, (*ArgBeg)->getType());
     return;
   }
-  llvm::Value *Callee = CGM.GetAddrOfCXXConstructor(D, 
-                                                    clang::Ctor_Complete);
+  llvm::Value *Callee = CGM.GetAddrOfCXXConstructor(D, clang::Ctor_Complete);
   assert(D->isInstance() &&
          "Trying to emit a member call expr on a static method!");
   
-  const FunctionProtoType *FPT = D->getType()->getAs<FunctionProtoType>();
+  const FunctionProtoType *FPT = D->getType()->castAs<FunctionProtoType>();
   
   CallArgList Args;
   
   // Push the this ptr.
   Args.add(RValue::get(This), D->getThisType(getContext()));
   
-  
   // Push the src ptr.
   QualType QT = *(FPT->arg_type_begin());
   llvm::Type *t = CGM.getTypes().ConvertType(QT);
   Src = Builder.CreateBitCast(Src, t);
   Args.add(RValue::get(Src), QT);
-  
+
   // Skip over first argument (Src).
-  ++ArgBeg;
-  CallExpr::const_arg_iterator Arg = ArgBeg;
-  for (FunctionProtoType::arg_type_iterator I = FPT->arg_type_begin()+1,
-       E = FPT->arg_type_end(); I != E; ++I, ++Arg) {
-    assert(Arg != ArgEnd && "Running over edge of argument list!");
-    EmitCallArg(Args, *Arg, *I);
-  }
-  // Either we've emitted all the call args, or we have a call to a
-  // variadic function.
-  assert((Arg == ArgEnd || FPT->isVariadic()) &&
-         "Extra arguments in non-variadic function!");
-  // If we still have any arguments, emit them using the type of the argument.
-  for (; Arg != ArgEnd; ++Arg) {
-    QualType ArgType = Arg->getType();
-    EmitCallArg(Args, *Arg, ArgType);
-  }
-  
+  EmitCallArgs(Args, FPT->isVariadic(), FPT->arg_type_begin() + 1,
+               FPT->arg_type_end(), ArgBeg + 1, ArgEnd);
+
   EmitCall(CGM.getTypes().arrangeCXXMethodCall(Args, FPT, RequiredArgs::All),
            Callee, ReturnValueSlot(), Args, D);
 }
@@ -1716,7 +1727,8 @@ CodeGenFunction::EmitSynthesizedCXXCopyCtorCall(const CXXConstructorDecl *D,
 void
 CodeGenFunction::EmitDelegateCXXConstructorCall(const CXXConstructorDecl *Ctor,
                                                 CXXCtorType CtorType,
-                                                const FunctionArgList &Args) {
+                                                const FunctionArgList &Args,
+                                                SourceLocation Loc) {
   CallArgList DelegateArgs;
 
   FunctionArgList::const_iterator I = Args.begin(), E = Args.end();
@@ -1743,7 +1755,8 @@ CodeGenFunction::EmitDelegateCXXConstructorCall(const CXXConstructorDecl *Ctor,
   // Explicit arguments.
   for (; I != E; ++I) {
     const VarDecl *param = *I;
-    EmitDelegateCallArg(DelegateArgs, param);
+    // FIXME: per-argument source location
+    EmitDelegateCallArg(DelegateArgs, param, Loc);
   }
 
   llvm::Value *Callee = CGM.GetAddrOfCXXConstructor(Ctor, CtorType);
@@ -1801,8 +1814,8 @@ void CodeGenFunction::EmitCXXDestructorCall(const CXXDestructorDecl *DD,
                                             bool ForVirtualBase,
                                             bool Delegating,
                                             llvm::Value *This) {
-  llvm::Value *VTT = GetVTTParameter(GlobalDecl(DD, Type),
-                                     ForVirtualBase, Delegating);
+  GlobalDecl GD(DD, Type);
+  llvm::Value *VTT = GetVTTParameter(GD, ForVirtualBase, Delegating);
   llvm::Value *Callee = 0;
   if (getLangOpts().AppleKext)
     Callee = BuildAppleKextVirtualDestructorCall(DD, Type, 
@@ -1810,7 +1823,10 @@ void CodeGenFunction::EmitCXXDestructorCall(const CXXDestructorDecl *DD,
     
   if (!Callee)
     Callee = CGM.GetAddrOfCXXDestructor(DD, Type);
-  
+
+  if (DD->isVirtual())
+    This = CGM.getCXXABI().adjustThisArgumentForVirtualCall(*this, GD, This);
+
   // FIXME: Provide a source location here.
   EmitCXXMemberCall(DD, SourceLocation(), Callee, ReturnValueSlot(), This,
                     VTT, getContext().getPointerType(getContext().VoidPtrTy),
@@ -1852,40 +1868,20 @@ void
 CodeGenFunction::InitializeVTablePointer(BaseSubobject Base, 
                                          const CXXRecordDecl *NearestVBase,
                                          CharUnits OffsetFromNearestVBase,
-                                         llvm::Constant *VTable,
                                          const CXXRecordDecl *VTableClass) {
-  const CXXRecordDecl *RD = Base.getBase();
-
   // Compute the address point.
-  llvm::Value *VTableAddressPoint;
-
-  bool NeedsVTTParam = CGM.getCXXABI().NeedsVTTParameter(CurGD);
-
-  // Check if we need to use a vtable from the VTT.
-  if (NeedsVTTParam && (RD->getNumVBases() || NearestVBase)) {
-    // Get the secondary vpointer index.
-    uint64_t VirtualPointerIndex = 
-     CGM.getVTables().getSecondaryVirtualPointerIndex(VTableClass, Base);
-    
-    /// Load the VTT.
-    llvm::Value *VTT = LoadCXXVTT();
-    if (VirtualPointerIndex)
-      VTT = Builder.CreateConstInBoundsGEP1_64(VTT, VirtualPointerIndex);
-
-    // And load the address point from the VTT.
-    VTableAddressPoint = Builder.CreateLoad(VTT);
-  } else {
-    uint64_t AddressPoint =
-      CGM.getVTableContext().getVTableLayout(VTableClass).getAddressPoint(Base);
-    VTableAddressPoint =
-      Builder.CreateConstInBoundsGEP2_64(VTable, 0, AddressPoint);
-  }
+  bool NeedsVirtualOffset;
+  llvm::Value *VTableAddressPoint =
+      CGM.getCXXABI().getVTableAddressPointInStructor(
+          *this, VTableClass, Base, NearestVBase, NeedsVirtualOffset);
+  if (!VTableAddressPoint)
+    return;
 
   // Compute where to store the address point.
   llvm::Value *VirtualOffset = 0;
   CharUnits NonVirtualOffset = CharUnits::Zero();
   
-  if (NeedsVTTParam && NearestVBase) {
+  if (NeedsVirtualOffset) {
     // We need to use the virtual base offset offset because the virtual base
     // might have a different offset in the most derived class.
     VirtualOffset = CGM.getCXXABI().GetVirtualBaseClassOffset(*this,
@@ -1919,7 +1915,6 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
                                           const CXXRecordDecl *NearestVBase,
                                           CharUnits OffsetFromNearestVBase,
                                           bool BaseIsNonVirtualPrimaryBase,
-                                          llvm::Constant *VTable,
                                           const CXXRecordDecl *VTableClass,
                                           VisitedVirtualBasesSetTy& VBases) {
   // If this base is a non-virtual primary base the address point has already
@@ -1927,7 +1922,7 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
   if (!BaseIsNonVirtualPrimaryBase) {
     // Initialize the vtable pointer for this base.
     InitializeVTablePointer(Base, NearestVBase, OffsetFromNearestVBase,
-                            VTable, VTableClass);
+                            VTableClass);
   }
   
   const CXXRecordDecl *RD = Base.getBase();
@@ -1970,7 +1965,7 @@ CodeGenFunction::InitializeVTablePointers(BaseSubobject Base,
                              I->isVirtual() ? BaseDecl : NearestVBase,
                              BaseOffsetFromNearestVBase,
                              BaseDeclIsNonVirtualPrimaryBase, 
-                             VTable, VTableClass, VBases);
+                             VTableClass, VBases);
   }
 }
 
@@ -1979,16 +1974,15 @@ void CodeGenFunction::InitializeVTablePointers(const CXXRecordDecl *RD) {
   if (!RD->isDynamicClass())
     return;
 
-  // Get the VTable.
-  llvm::Constant *VTable = CGM.getVTables().GetAddrOfVTable(RD);
-
   // Initialize the vtable pointers for this class and all of its bases.
   VisitedVirtualBasesSetTy VBases;
   InitializeVTablePointers(BaseSubobject(RD, CharUnits::Zero()), 
                            /*NearestVBase=*/0, 
                            /*OffsetFromNearestVBase=*/CharUnits::Zero(),
-                           /*BaseIsNonVirtualPrimaryBase=*/false, 
-                           VTable, RD, VBases);
+                           /*BaseIsNonVirtualPrimaryBase=*/false, RD, VBases);
+
+  if (RD->getNumVBases())
+    CGM.getCXXABI().initializeHiddenVirtualInheritanceMembers(*this, RD);
 }
 
 llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
@@ -1999,29 +1993,6 @@ llvm::Value *CodeGenFunction::GetVTablePtr(llvm::Value *This,
   return VTable;
 }
 
-static const CXXRecordDecl *getMostDerivedClassDecl(const Expr *Base) {
-  const Expr *E = Base;
-  
-  while (true) {
-    E = E->IgnoreParens();
-    if (const CastExpr *CE = dyn_cast<CastExpr>(E)) {
-      if (CE->getCastKind() == CK_DerivedToBase || 
-          CE->getCastKind() == CK_UncheckedDerivedToBase ||
-          CE->getCastKind() == CK_NoOp) {
-        E = CE->getSubExpr();
-        continue;
-      }
-    }
-
-    break;
-  }
-
-  QualType DerivedType = E->getType();
-  if (const PointerType *PTy = DerivedType->getAs<PointerType>())
-    DerivedType = PTy->getPointeeType();
-
-  return cast<CXXRecordDecl>(DerivedType->castAs<RecordType>()->getDecl());
-}
 
 // FIXME: Ideally Expr::IgnoreParenNoopCasts should do this, but it doesn't do
 // quite what we want.
@@ -2048,10 +2019,14 @@ static const Expr *skipNoOpCastsAndParens(const Expr *E) {
   }
 }
 
-/// canDevirtualizeMemberFunctionCall - Checks whether the given virtual member
-/// function call on the given expr can be devirtualized.
-static bool canDevirtualizeMemberFunctionCall(const Expr *Base, 
-                                              const CXXMethodDecl *MD) {
+bool
+CodeGenFunction::CanDevirtualizeMemberFunctionCall(const Expr *Base,
+                                                   const CXXMethodDecl *MD) {
+  // When building with -fapple-kext, all calls must go through the vtable since
+  // the kernel linker can do runtime patching of vtables.
+  if (getLangOpts().AppleKext)
+    return false;
+
   // If the most derived class is marked final, we know that no subclass can
   // override this member function and so we can devirtualize it. For example:
   //
@@ -2062,7 +2037,7 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
   //   b->f();
   // }
   //
-  const CXXRecordDecl *MostDerivedClassDecl = getMostDerivedClassDecl(Base);
+  const CXXRecordDecl *MostDerivedClassDecl = Base->getBestDynamicClassType();
   if (MostDerivedClassDecl->hasAttr<FinalAttr>())
     return true;
 
@@ -2085,7 +2060,14 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
     
     return false;
   }
-  
+
+  // We can devirtualize calls on an object accessed by a class member access
+  // expression, since by C++11 [basic.life]p6 we know that it can't refer to
+  // a derived class object constructed in the same location.
+  if (const MemberExpr *ME = dyn_cast<MemberExpr>(Base))
+    if (const ValueDecl *VD = dyn_cast<ValueDecl>(ME->getMemberDecl()))
+      return VD->getType()->isRecordType();
+
   // We can always devirtualize calls on temporary object expressions.
   if (isa<CXXConstructExpr>(Base))
     return true;
@@ -2102,20 +2084,6 @@ static bool canDevirtualizeMemberFunctionCall(const Expr *Base,
   return false;
 }
 
-static bool UseVirtualCall(ASTContext &Context,
-                           const CXXOperatorCallExpr *CE,
-                           const CXXMethodDecl *MD) {
-  if (!MD->isVirtual())
-    return false;
-  
-  // When building with -fapple-kext, all calls must go through the vtable since
-  // the kernel linker can do runtime patching of vtables.
-  if (Context.getLangOpts().AppleKext)
-    return true;
-
-  return !canDevirtualizeMemberFunctionCall(CE->getArg(0), MD);
-}
-
 llvm::Value *
 CodeGenFunction::EmitCXXOperatorMemberCallee(const CXXOperatorCallExpr *E,
                                              const CXXMethodDecl *MD,
@@ -2124,20 +2092,15 @@ CodeGenFunction::EmitCXXOperatorMemberCallee(const CXXOperatorCallExpr *E,
     CGM.getTypes().GetFunctionType(
                              CGM.getTypes().arrangeCXXMethodDeclaration(MD));
 
-  if (UseVirtualCall(getContext(), E, MD))
-    return BuildVirtualCall(MD, This, fnType);
+  if (MD->isVirtual() && !CanDevirtualizeMemberFunctionCall(E->getArg(0), MD))
+    return CGM.getCXXABI().getVirtualFunctionPointer(*this, MD, This, fnType);
 
   return CGM.GetAddrOfFunction(MD, fnType);
 }
 
-void CodeGenFunction::EmitForwardingCallToLambda(const CXXRecordDecl *lambda,
-                                                 CallArgList &callArgs) {
-  // Lookup the call operator
-  DeclarationName operatorName
-    = getContext().DeclarationNames.getCXXOperatorName(OO_Call);
-  CXXMethodDecl *callOperator =
-    cast<CXXMethodDecl>(lambda->lookup(operatorName).front());
-
+void CodeGenFunction::EmitForwardingCallToLambda(
+                                      const CXXMethodDecl *callOperator,
+                                      CallArgList &callArgs) {
   // Get the address of the call operator.
   const CGFunctionInfo &calleeFnInfo =
     CGM.getTypes().arrangeCXXMethodDeclaration(callOperator);
@@ -2186,10 +2149,11 @@ void CodeGenFunction::EmitLambdaBlockInvokeBody() {
   for (BlockDecl::param_const_iterator I = BD->param_begin(),
        E = BD->param_end(); I != E; ++I) {
     ParmVarDecl *param = *I;
-    EmitDelegateCallArg(CallArgs, param);
+    EmitDelegateCallArg(CallArgs, param, param->getLocStart());
   }
-
-  EmitForwardingCallToLambda(Lambda, CallArgs);
+  assert(!Lambda->isGenericLambda() && 
+            "generic lambda interconversion to block not implemented");
+  EmitForwardingCallToLambda(Lambda->getLambdaCallOperator(), CallArgs);
 }
 
 void CodeGenFunction::EmitLambdaToBlockPointerBody(FunctionArgList &Args) {
@@ -2200,7 +2164,7 @@ void CodeGenFunction::EmitLambdaToBlockPointerBody(FunctionArgList &Args) {
     return;
   }
 
-  EmitFunctionBody(Args);
+  EmitFunctionBody(Args, cast<FunctionDecl>(CurGD.getDecl())->getBody());
 }
 
 void CodeGenFunction::EmitLambdaDelegatingInvokeBody(const CXXMethodDecl *MD) {
@@ -2217,10 +2181,22 @@ void CodeGenFunction::EmitLambdaDelegatingInvokeBody(const CXXMethodDecl *MD) {
   for (FunctionDecl::param_const_iterator I = MD->param_begin(),
        E = MD->param_end(); I != E; ++I) {
     ParmVarDecl *param = *I;
-    EmitDelegateCallArg(CallArgs, param);
+    EmitDelegateCallArg(CallArgs, param, param->getLocStart());
   }
-
-  EmitForwardingCallToLambda(Lambda, CallArgs);
+  const CXXMethodDecl *CallOp = Lambda->getLambdaCallOperator();
+  // For a generic lambda, find the corresponding call operator specialization
+  // to which the call to the static-invoker shall be forwarded.
+  if (Lambda->isGenericLambda()) {
+    assert(MD->isFunctionTemplateSpecialization());
+    const TemplateArgumentList *TAL = MD->getTemplateSpecializationArgs();
+    FunctionTemplateDecl *CallOpTemplate = CallOp->getDescribedFunctionTemplate();
+    void *InsertPos = 0;
+    FunctionDecl *CorrespondingCallOpSpecialization = 
+        CallOpTemplate->findSpecialization(TAL->data(), TAL->size(), InsertPos); 
+    assert(CorrespondingCallOpSpecialization);
+    CallOp = cast<CXXMethodDecl>(CorrespondingCallOpSpecialization);
+  }
+  EmitForwardingCallToLambda(CallOp, CallArgs);
 }
 
 void CodeGenFunction::EmitLambdaStaticInvokeFunction(const CXXMethodDecl *MD) {

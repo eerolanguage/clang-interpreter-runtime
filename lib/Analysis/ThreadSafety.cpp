@@ -266,6 +266,11 @@ private:
     return NodeVec.size()-1;
   }
 
+  inline bool isCalleeArrow(const Expr *E) {
+    const MemberExpr *ME = dyn_cast<MemberExpr>(E->IgnoreParenCasts());
+    return ME ? ME->isArrow() : false;
+  }
+
   /// Build an SExpr from the given C++ expression.
   /// Recursive function that terminates on DeclRefExpr.
   /// Note: this function merely creates a SExpr; it does not check to
@@ -323,13 +328,11 @@ private:
     } else if (const CXXMemberCallExpr *CMCE = dyn_cast<CXXMemberCallExpr>(Exp)) {
       // When calling a function with a lock_returned attribute, replace
       // the function call with the expression in lock_returned.
-      const CXXMethodDecl* MD =
-        cast<CXXMethodDecl>(CMCE->getMethodDecl()->getMostRecentDecl());
+      const CXXMethodDecl *MD = CMCE->getMethodDecl()->getMostRecentDecl();
       if (LockReturnedAttr* At = MD->getAttr<LockReturnedAttr>()) {
         CallingContext LRCallCtx(CMCE->getMethodDecl());
         LRCallCtx.SelfArg = CMCE->getImplicitObjectArgument();
-        LRCallCtx.SelfArrow =
-          dyn_cast<MemberExpr>(CMCE->getCallee())->isArrow();
+        LRCallCtx.SelfArrow = isCalleeArrow(CMCE->getCallee());
         LRCallCtx.NumArgs = CMCE->getNumArgs();
         LRCallCtx.FunArgs = CMCE->getArgs();
         LRCallCtx.PrevCtx = CallCtx;
@@ -339,7 +342,7 @@ private:
       // ignore any method named get().
       if (CMCE->getMethodDecl()->getNameAsString() == "get" &&
           CMCE->getNumArgs() == 0) {
-        if (NDeref && dyn_cast<MemberExpr>(CMCE->getCallee())->isArrow())
+        if (NDeref && isCalleeArrow(CMCE->getCallee()))
           ++(*NDeref);
         return buildSExpr(CMCE->getImplicitObjectArgument(), CallCtx, NDeref);
       }
@@ -353,8 +356,7 @@ private:
       NodeVec[Root].setSize(Sz + 1);
       return Sz + 1;
     } else if (const CallExpr *CE = dyn_cast<CallExpr>(Exp)) {
-      const FunctionDecl* FD =
-        cast<FunctionDecl>(CE->getDirectCallee()->getMostRecentDecl());
+      const FunctionDecl *FD = CE->getDirectCallee()->getMostRecentDecl();
       if (LockReturnedAttr* At = FD->getAttr<LockReturnedAttr>()) {
         CallingContext LRCallCtx(CE->getDirectCallee());
         LRCallCtx.NumArgs = CE->getNumArgs();
@@ -498,11 +500,10 @@ private:
     } else if (const CXXMemberCallExpr *CE =
                dyn_cast<CXXMemberCallExpr>(DeclExp)) {
       CallCtx.SelfArg   = CE->getImplicitObjectArgument();
-      CallCtx.SelfArrow = dyn_cast<MemberExpr>(CE->getCallee())->isArrow();
+      CallCtx.SelfArrow = isCalleeArrow(CE->getCallee());
       CallCtx.NumArgs   = CE->getNumArgs();
       CallCtx.FunArgs   = CE->getArgs();
-    } else if (const CallExpr *CE =
-               dyn_cast<CallExpr>(DeclExp)) {
+    } else if (const CallExpr *CE = dyn_cast<CallExpr>(DeclExp)) {
       CallCtx.NumArgs = CE->getNumArgs();
       CallCtx.FunArgs = CE->getArgs();
     } else if (const CXXConstructExpr *CE =
@@ -1660,15 +1661,22 @@ const CallExpr* ThreadSafetyAnalyzer::getTrylockCallExpr(const Stmt *Cond,
         if (!TCond) Negate = !Negate;
         return getTrylockCallExpr(BOP->getLHS(), C, Negate);
       }
-      else if (getStaticBooleanValue(BOP->getLHS(), TCond)) {
+      TCond = false;
+      if (getStaticBooleanValue(BOP->getLHS(), TCond)) {
         if (!TCond) Negate = !Negate;
         return getTrylockCallExpr(BOP->getRHS(), C, Negate);
       }
       return 0;
     }
+    if (BOP->getOpcode() == BO_LAnd) {
+      // LHS must have been evaluated in a different block.
+      return getTrylockCallExpr(BOP->getRHS(), C, Negate);
+    }
+    if (BOP->getOpcode() == BO_LOr) {
+      return getTrylockCallExpr(BOP->getRHS(), C, Negate);
+    }
     return 0;
   }
-  // FIXME -- handle && and || as well.
   return 0;
 }
 
@@ -1682,11 +1690,11 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
                                           const CFGBlock *CurrBlock) {
   Result = ExitSet;
 
-  if (!PredBlock->getTerminatorCondition())
+  const Stmt *Cond = PredBlock->getTerminatorCondition();
+  if (!Cond)
     return;
 
   bool Negate = false;
-  const Stmt *Cond = PredBlock->getTerminatorCondition();
   const CFGBlockInfo *PredBlockInfo = &BlockInfo[PredBlock->getBlockID()];
   const LocalVarContext &LVarCtx = PredBlockInfo->ExitContext;
 
@@ -1698,7 +1706,6 @@ void ThreadSafetyAnalyzer::getEdgeLockset(FactSet& Result,
   NamedDecl *FunDecl = dyn_cast_or_null<NamedDecl>(Exp->getCalleeDecl());
   if(!FunDecl || !FunDecl->hasAttrs())
     return;
-
 
   MutexIDList ExclusiveLocksToAdd;
   MutexIDList SharedLocksToAdd;
@@ -1871,6 +1878,13 @@ void BuildLockset::checkAccess(const Expr *Exp, AccessKind AK) {
     return;
   }
 
+  if (const ArraySubscriptExpr *AE = dyn_cast<ArraySubscriptExpr>(Exp)) {
+    if (Analyzer->Handler.issueBetaWarnings()) {
+      checkPtAccess(AE->getLHS(), AK);
+      return;
+    }
+  }
+
   if (const MemberExpr *ME = dyn_cast<MemberExpr>(Exp)) {
     if (ME->isArrow())
       checkPtAccess(ME->getBase(), AK);
@@ -1894,7 +1908,27 @@ void BuildLockset::checkAccess(const Expr *Exp, AccessKind AK) {
 
 /// \brief Checks pt_guarded_by and pt_guarded_var attributes.
 void BuildLockset::checkPtAccess(const Expr *Exp, AccessKind AK) {
-  Exp = Exp->IgnoreParenCasts();
+  if (Analyzer->Handler.issueBetaWarnings()) {
+    while (true) {
+      if (const ParenExpr *PE = dyn_cast<ParenExpr>(Exp)) {
+        Exp = PE->getSubExpr();
+        continue;
+      }
+      if (const CastExpr *CE = dyn_cast<CastExpr>(Exp)) {
+        if (CE->getCastKind() == CK_ArrayToPointerDecay) {
+          // If it's an actual array, and not a pointer, then it's elements
+          // are protected by GUARDED_BY, not PT_GUARDED_BY;
+          checkAccess(CE->getSubExpr(), AK);
+          return;
+        }
+        Exp = CE->getSubExpr();
+        continue;
+      }
+      break;
+    }
+  }
+  else
+    Exp = Exp->IgnoreParenCasts();
 
   const ValueDecl *D = getValueDecl(Exp);
   if (!D || !D->hasAttrs())
@@ -2091,6 +2125,7 @@ void BuildLockset::VisitBinaryOperator(BinaryOperator *BO) {
   checkAccess(BO->getLHS(), AK_Written);
 }
 
+
 /// Whenever we do an LValue to Rvalue cast, we are reading a variable and
 /// need to ensure we hold any required mutexes.
 /// FIXME: Deal with non-primitive types.
@@ -2130,9 +2165,19 @@ void BuildLockset::VisitCallExpr(CallExpr *Exp) {
         checkAccess(Source, AK_Read);
         break;
       }
+      case OO_Star:
+      case OO_Arrow:
+      case OO_Subscript: {
+        if (Analyzer->Handler.issueBetaWarnings()) {
+          const Expr *Obj = OE->getArg(0);
+          checkAccess(Obj, AK_Read);
+          checkPtAccess(Obj, AK_Read);
+        }
+        break;
+      }
       default: {
-        const Expr *Source = OE->getArg(0);
-        checkAccess(Source, AK_Read);
+        const Expr *Obj = OE->getArg(0);
+        checkAccess(Obj, AK_Read);
         break;
       }
     }
@@ -2352,8 +2397,6 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
                    = dyn_cast<SharedLocksRequiredAttr>(Attr)) {
         getMutexIDs(SharedLocksToAdd, A, (Expr*) 0, D);
       } else if (UnlockFunctionAttr *A = dyn_cast<UnlockFunctionAttr>(Attr)) {
-        if (!Handler.issueBetaWarnings())
-          return;
         // UNLOCK_FUNCTION() is used to hide the underlying lock implementation.
         // We must ignore such methods.
         if (A->args_size() == 0)
@@ -2363,15 +2406,11 @@ void ThreadSafetyAnalyzer::runAnalysis(AnalysisDeclContext &AC) {
         getMutexIDs(LocksReleased, A, (Expr*) 0, D);
       } else if (ExclusiveLockFunctionAttr *A
                    = dyn_cast<ExclusiveLockFunctionAttr>(Attr)) {
-        if (!Handler.issueBetaWarnings())
-          return;
         if (A->args_size() == 0)
           return;
         getMutexIDs(ExclusiveLocksAcquired, A, (Expr*) 0, D);
       } else if (SharedLockFunctionAttr *A
                    = dyn_cast<SharedLockFunctionAttr>(Attr)) {
-        if (!Handler.issueBetaWarnings())
-          return;
         if (A->args_size() == 0)
           return;
         getMutexIDs(SharedLocksAcquired, A, (Expr*) 0, D);

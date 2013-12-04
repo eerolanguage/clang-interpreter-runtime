@@ -21,69 +21,125 @@ namespace clang {
 namespace ast_matchers {
 namespace dynamic {
 
-VariantMatcher::VariantMatcher() : List() {}
+VariantMatcher::MatcherOps::~MatcherOps() {}
+VariantMatcher::Payload::~Payload() {}
 
-VariantMatcher::VariantMatcher(const VariantMatcher& Other) {
-  *this = Other;
-}
+class VariantMatcher::SinglePayload : public VariantMatcher::Payload {
+public:
+  SinglePayload(const DynTypedMatcher &Matcher) : Matcher(Matcher) {}
+
+  virtual llvm::Optional<DynTypedMatcher> getSingleMatcher() const {
+    return Matcher;
+  }
+
+  virtual std::string getTypeAsString() const {
+    return (Twine("Matcher<") + Matcher.getSupportedKind().asStringRef() + ">")
+        .str();
+  }
+
+  virtual void makeTypedMatcher(MatcherOps &Ops) const {
+    if (Ops.canConstructFrom(Matcher))
+      Ops.constructFrom(Matcher);
+  }
+
+private:
+  const DynTypedMatcher Matcher;
+};
+
+class VariantMatcher::PolymorphicPayload : public VariantMatcher::Payload {
+public:
+  PolymorphicPayload(ArrayRef<DynTypedMatcher> MatchersIn)
+      : Matchers(MatchersIn) {}
+
+  virtual ~PolymorphicPayload() {}
+
+  virtual llvm::Optional<DynTypedMatcher> getSingleMatcher() const {
+    if (Matchers.size() != 1)
+      return llvm::Optional<DynTypedMatcher>();
+    return Matchers[0];
+  }
+
+  virtual std::string getTypeAsString() const {
+    std::string Inner;
+    for (size_t i = 0, e = Matchers.size(); i != e; ++i) {
+      if (i != 0)
+        Inner += "|";
+      Inner += Matchers[i].getSupportedKind().asStringRef();
+    }
+    return (Twine("Matcher<") + Inner + ">").str();
+  }
+
+  virtual void makeTypedMatcher(MatcherOps &Ops) const {
+    const DynTypedMatcher *Found = NULL;
+    for (size_t i = 0, e = Matchers.size(); i != e; ++i) {
+      if (Ops.canConstructFrom(Matchers[i])) {
+        if (Found)
+          return;
+        Found = &Matchers[i];
+      }
+    }
+    if (Found)
+      Ops.constructFrom(*Found);
+  }
+
+  const std::vector<DynTypedMatcher> Matchers;
+};
+
+class VariantMatcher::VariadicOpPayload : public VariantMatcher::Payload {
+public:
+  VariadicOpPayload(ast_matchers::internal::VariadicOperatorFunction Func,
+                    ArrayRef<VariantMatcher> Args)
+      : Func(Func), Args(Args) {}
+
+  virtual llvm::Optional<DynTypedMatcher> getSingleMatcher() const {
+    return llvm::Optional<DynTypedMatcher>();
+  }
+
+  virtual std::string getTypeAsString() const {
+    std::string Inner;
+    for (size_t i = 0, e = Args.size(); i != e; ++i) {
+      if (i != 0)
+        Inner += "&";
+      Inner += Args[i].getTypeAsString();
+    }
+    return Inner;
+  }
+
+  virtual void makeTypedMatcher(MatcherOps &Ops) const {
+    Ops.constructVariadicOperator(Func, Args);
+  }
+
+private:
+  const ast_matchers::internal::VariadicOperatorFunction Func;
+  const std::vector<VariantMatcher> Args;
+};
+
+VariantMatcher::VariantMatcher() {}
 
 VariantMatcher VariantMatcher::SingleMatcher(const DynTypedMatcher &Matcher) {
-  VariantMatcher Out;
-  Out.List.push_back(Matcher.clone());
-  return Out;
+  return VariantMatcher(new SinglePayload(Matcher));
 }
 
 VariantMatcher
-VariantMatcher::PolymorphicMatcher(ArrayRef<const DynTypedMatcher *> Matchers) {
-  VariantMatcher Out;
-  for (size_t i = 0, e = Matchers.size(); i != e; ++i) {
-    Out.List.push_back(Matchers[i]->clone());
-  }
-  return Out;
+VariantMatcher::PolymorphicMatcher(ArrayRef<DynTypedMatcher> Matchers) {
+  return VariantMatcher(new PolymorphicPayload(Matchers));
 }
 
-VariantMatcher::~VariantMatcher() {
-  reset();
+VariantMatcher VariantMatcher::VariadicOperatorMatcher(
+    ast_matchers::internal::VariadicOperatorFunction Func,
+    ArrayRef<VariantMatcher> Args) {
+  return VariantMatcher(new VariadicOpPayload(Func, Args));
 }
 
-VariantMatcher &VariantMatcher::operator=(const VariantMatcher &Other) {
-  if (this == &Other) return *this;
-  reset();
-  for (size_t i = 0, e = Other.List.size(); i != e; ++i) {
-    List.push_back(Other.List[i]->clone());
-  }
-  return *this;
+llvm::Optional<DynTypedMatcher> VariantMatcher::getSingleMatcher() const {
+  return Value ? Value->getSingleMatcher() : llvm::Optional<DynTypedMatcher>();
 }
 
-bool VariantMatcher::getSingleMatcher(const DynTypedMatcher *&Out) const {
-  if (List.size() != 1) return false;
-  Out = List[0];
-  return true;
-}
-
-void VariantMatcher::reset() {
-  llvm::DeleteContainerPointers(List);
-}
+void VariantMatcher::reset() { Value.reset(); }
 
 std::string VariantMatcher::getTypeAsString() const {
-  std::string Inner;
-  for (size_t I = 0, E = List.size(); I != E; ++I) {
-    if (I != 0) Inner += "|";
-    Inner += List[I]->getSupportedKind().asStringRef();
-  }
-  return (Twine("Matcher<") + Inner + ">").str();
-}
-
-const DynTypedMatcher *VariantMatcher::getTypedMatcher(
-    bool (*CanConstructCallback)(const DynTypedMatcher &)) const {
-  const DynTypedMatcher *Out = NULL;
-  for (size_t i = 0, e = List.size(); i != e; ++i) {
-    if (CanConstructCallback(*List[i])) {
-      if (Out) return NULL;
-      Out = List[i];
-    }
-  }
-  return Out;
+  if (Value) return Value->getTypeAsString();
+  return "<Nothing>";
 }
 
 VariantValue::VariantValue(const VariantValue &Other) : Type(VT_Nothing) {

@@ -10,7 +10,7 @@
 // This file implements the Expression parsing implementation for C++.
 //
 //===----------------------------------------------------------------------===//
-
+#include "clang/AST/DeclTemplate.h"
 #include "clang/Parse/Parser.h"
 #include "RAIIObjectsForParser.h"
 #include "clang/Basic/PrettyStackTrace.h"
@@ -20,6 +20,7 @@
 #include "clang/Sema/ParsedTemplate.h"
 #include "clang/Sema/Scope.h"
 #include "llvm/Support/ErrorHandling.h"
+
 
 using namespace clang;
 
@@ -340,10 +341,10 @@ bool Parser::ParseOptionalCXXScopeSpecifier(CXXScopeSpec &SS,
     if (Tok.is(tok::annot_template_id) && NextToken().is(tok::coloncolon)) {
       // We have
       //
-      //   simple-template-id '::'
+      //   template-id '::'
       //
-      // So we need to check whether the simple-template-id is of the
-      // right kind (it should name a type or be dependent), and then
+      // So we need to check whether the template-id is a simple-template-id of
+      // the right kind (it should name a type or be dependent), and then
       // convert it into a type within the nested-name-specifier.
       TemplateIdAnnotation *TemplateId = takeTemplateIdAnnotation(Tok);
       if (CheckForDestructor && GetLookAheadToken(2).is(tok::tilde)) {
@@ -636,9 +637,9 @@ ExprResult Parser::ParseLambdaExpression() {
   Optional<unsigned> DiagID(ParseLambdaIntroducer(Intro));
   if (DiagID) {
     Diag(Tok, DiagID.getValue());
-    SkipUntil(tok::r_square);
-    SkipUntil(tok::l_brace);
-    SkipUntil(tok::r_brace);
+    SkipUntil(tok::r_square, StopAtSemi);
+    SkipUntil(tok::l_brace, StopAtSemi);
+    SkipUntil(tok::r_brace, StopAtSemi);
     return ExprError();
   }
 
@@ -908,12 +909,16 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
   PrettyStackTraceLoc CrashInfo(PP.getSourceManager(), LambdaBeginLoc,
                                 "lambda expression parsing");
 
+ 
+
   // FIXME: Call into Actions to add any init-capture declarations to the
   // scope while parsing the lambda-declarator and compound-statement.
 
   // Parse lambda-declarator[opt].
   DeclSpec DS(AttrFactory);
   Declarator D(DS, Declarator::LambdaExprContext);
+  TemplateParameterDepthRAII CurTemplateDepthTracker(TemplateParameterDepth);
+  Actions.PushLambdaScope();    
 
   if (Tok.is(tok::l_paren)) {
     ParseScope PrototypeScope(this,
@@ -931,9 +936,15 @@ ExprResult Parser::ParseLambdaExpressionAfterIntroducer(
     SmallVector<DeclaratorChunk::ParamInfo, 16> ParamInfo;
     SourceLocation EllipsisLoc;
 
-    if (Tok.isNot(tok::r_paren))
+    
+    if (Tok.isNot(tok::r_paren)) {
+      Actions.RecordParsingTemplateParameterDepth(TemplateParameterDepth);
       ParseParameterDeclarationClause(D, Attr, ParamInfo, EllipsisLoc);
-
+      // For a generic lambda, each 'auto' within the parameter declaration 
+      // clause creates a template type parameter, so increment the depth.
+      if (Actions.getCurGenericLambda()) 
+        ++CurTemplateDepthTracker;
+    }
     T.consumeClose();
     SourceLocation RParenLoc = T.getCloseLocation();
     DeclEndLoc = RParenLoc;
@@ -1194,7 +1205,7 @@ ExprResult Parser::ParseCXXTypeid() {
 
     // Match the ')'.
     if (Result.isInvalid())
-      SkipUntil(tok::r_paren);
+      SkipUntil(tok::r_paren, StopAtSemi);
     else {
       T.consumeClose();
       RParenLoc = T.getCloseLocation();
@@ -1244,7 +1255,7 @@ ExprResult Parser::ParseCXXUuidof() {
 
     // Match the ')'.
     if (Result.isInvalid())
-      SkipUntil(tok::r_paren);
+      SkipUntil(tok::r_paren, StopAtSemi);
     else {
       T.consumeClose();
 
@@ -1430,7 +1441,7 @@ Parser::ParseCXXTypeConstructExpression(const DeclSpec &DS) {
 
     if (Tok.isNot(tok::r_paren)) {
       if (ParseExpressionList(Exprs, CommaLocs)) {
-        SkipUntil(tok::r_paren);
+        SkipUntil(tok::r_paren, StopAtSemi);
         return ExprError();
       }
     }
@@ -1516,7 +1527,7 @@ bool Parser::ParseCXXCondition(ExprResult &ExprOut,
     SourceLocation Loc;
     ExprResult AsmLabel(ParseSimpleAsm(&Loc));
     if (AsmLabel.isInvalid()) {
-      SkipUntil(tok::semi);
+      SkipUntil(tok::semi, StopAtSemi);
       return true;
     }
     DeclaratorInfo.setAsmLabel(AsmLabel.release());
@@ -1548,7 +1559,7 @@ bool Parser::ParseCXXCondition(ExprResult &ExprOut,
   } else if (Tok.is(tok::l_paren)) {
     // This was probably an attempt to initialize the variable.
     SourceLocation LParen = ConsumeParen(), RParen = LParen;
-    if (SkipUntil(tok::r_paren, true, /*DontConsume=*/true))
+    if (SkipUntil(tok::r_paren, StopAtSemi | StopBeforeMatch))
       RParen = ConsumeParen();
     Diag(DeclOut ? DeclOut->getLocation() : LParen,
          diag::err_expected_init_in_condition_lparen)
@@ -1871,6 +1882,7 @@ bool Parser::ParseUnqualifiedIdTemplateId(CXXScopeSpec &SS,
     TemplateIdAnnotation *TemplateId
       = TemplateIdAnnotation::Allocate(TemplateArgs.size(), TemplateIds);
 
+    // FIXME: Store name for literal operator too.
     if (Id.getKind() == UnqualifiedId::IK_Identifier) {
       TemplateId->Name = Id.Identifier;
       TemplateId->Operator = OO_None;
@@ -2408,14 +2420,14 @@ Parser::ParseCXXNewExpression(bool UseGlobal, SourceLocation Start) {
     T.consumeOpen();
     PlacementLParen = T.getOpenLocation();
     if (ParseExpressionListOrTypeId(PlacementArgs, DeclaratorInfo)) {
-      SkipUntil(tok::semi, /*StopAtSemi=*/true, /*DontConsume=*/true);
+      SkipUntil(tok::semi, StopAtSemi | StopBeforeMatch);
       return ExprError();
     }
 
     T.consumeClose();
     PlacementRParen = T.getCloseLocation();
     if (PlacementRParen.isInvalid()) {
-      SkipUntil(tok::semi, /*StopAtSemi=*/true, /*DontConsume=*/true);
+      SkipUntil(tok::semi, StopAtSemi | StopBeforeMatch);
       return ExprError();
     }
 
@@ -2458,7 +2470,7 @@ Parser::ParseCXXNewExpression(bool UseGlobal, SourceLocation Start) {
     }
   }
   if (DeclaratorInfo.isInvalidType()) {
-    SkipUntil(tok::semi, /*StopAtSemi=*/true, /*DontConsume=*/true);
+    SkipUntil(tok::semi, StopAtSemi | StopBeforeMatch);
     return ExprError();
   }
 
@@ -2473,14 +2485,14 @@ Parser::ParseCXXNewExpression(bool UseGlobal, SourceLocation Start) {
     if (Tok.isNot(tok::r_paren)) {
       CommaLocsTy CommaLocs;
       if (ParseExpressionList(ConstructorArgs, CommaLocs)) {
-        SkipUntil(tok::semi, /*StopAtSemi=*/true, /*DontConsume=*/true);
+        SkipUntil(tok::semi, StopAtSemi | StopBeforeMatch);
         return ExprError();
       }
     }
     T.consumeClose();
     ConstructorRParen = T.getCloseLocation();
     if (ConstructorRParen.isInvalid()) {
-      SkipUntil(tok::semi, /*StopAtSemi=*/true, /*DontConsume=*/true);
+      SkipUntil(tok::semi, StopAtSemi | StopBeforeMatch);
       return ExprError();
     }
     Initializer = Actions.ActOnParenListExpr(ConstructorLParen,
@@ -2521,7 +2533,7 @@ void Parser::ParseDirectNewDeclarator(Declarator &D) {
                                 : ParseConstantExpression());
     if (Size.isInvalid()) {
       // Recover
-      SkipUntil(tok::r_square);
+      SkipUntil(tok::r_square, StopAtSemi);
       return;
     }
     first = false;
@@ -2658,6 +2670,7 @@ static UnaryTypeTrait UnaryTypeTraitFromTokKind(tok::TokenKind kind) {
   case tok::kw___is_reference:               return UTT_IsReference;
   case tok::kw___is_rvalue_reference:        return UTT_IsRvalueReference;
   case tok::kw___is_scalar:                  return UTT_IsScalar;
+  case tok::kw___is_sealed:                  return UTT_IsSealed;
   case tok::kw___is_signed:                  return UTT_IsSigned;
   case tok::kw___is_standard_layout:         return UTT_IsStandardLayout;
   case tok::kw___is_trivial:                 return UTT_IsTrivial;
@@ -2750,18 +2763,18 @@ ExprResult Parser::ParseBinaryTypeTrait() {
 
   TypeResult LhsTy = ParseTypeName();
   if (LhsTy.isInvalid()) {
-    SkipUntil(tok::r_paren);
+    SkipUntil(tok::r_paren, StopAtSemi);
     return ExprError();
   }
 
   if (ExpectAndConsume(tok::comma, diag::err_expected_comma)) {
-    SkipUntil(tok::r_paren);
+    SkipUntil(tok::r_paren, StopAtSemi);
     return ExprError();
   }
 
   TypeResult RhsTy = ParseTypeName();
   if (RhsTy.isInvalid()) {
-    SkipUntil(tok::r_paren);
+    SkipUntil(tok::r_paren, StopAtSemi);
     return ExprError();
   }
 
@@ -2840,8 +2853,8 @@ ExprResult Parser::ParseArrayTypeTrait() {
 
   TypeResult Ty = ParseTypeName();
   if (Ty.isInvalid()) {
-    SkipUntil(tok::comma);
-    SkipUntil(tok::r_paren);
+    SkipUntil(tok::comma, StopAtSemi);
+    SkipUntil(tok::r_paren, StopAtSemi);
     return ExprError();
   }
 
@@ -2853,7 +2866,7 @@ ExprResult Parser::ParseArrayTypeTrait() {
   }
   case ATT_ArrayExtent: {
     if (ExpectAndConsume(tok::comma, diag::err_expected_comma)) {
-      SkipUntil(tok::r_paren);
+      SkipUntil(tok::r_paren, StopAtSemi);
       return ExprError();
     }
 
@@ -3010,7 +3023,7 @@ Parser::ParseCXXAmbiguousParenExpression(ParenParseOption &ExprType,
 
   // Match the ')'.
   if (Result.isInvalid()) {
-    SkipUntil(tok::r_paren);
+    SkipUntil(tok::r_paren, StopAtSemi);
     return ExprError();
   }
 

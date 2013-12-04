@@ -22,13 +22,14 @@
 #include "CXTranslationUnit.h"
 #include "CXType.h"
 #include "CursorVisitor.h"
-#include "SimpleFormatContext.h"
+#include "clang/AST/Attr.h"
 #include "clang/AST/StmtVisitor.h"
 #include "clang/Basic/Diagnostic.h"
 #include "clang/Basic/Version.h"
 #include "clang/Frontend/ASTUnit.h"
 #include "clang/Frontend/CompilerInstance.h"
 #include "clang/Frontend/FrontendDiagnostic.h"
+#include "clang/Index/CommentToXML.h"
 #include "clang/Lex/HeaderSearch.h"
 #include "clang/Lex/Lexer.h"
 #include "clang/Lex/PreprocessingRecord.h"
@@ -42,7 +43,6 @@
 #include "llvm/Support/Format.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Mutex.h"
-#include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Program.h"
 #include "llvm/Support/SaveAndRestore.h"
 #include "llvm/Support/Signals.h"
@@ -68,8 +68,7 @@ CXTranslationUnit cxtu::MakeCXTranslationUnit(CIndexer *CIdx, ASTUnit *AU) {
   D->StringPool = new cxstring::CXStringPool();
   D->Diagnostics = 0;
   D->OverridenCursorsPool = createOverridenCXCursorsPool();
-  D->FormatContext = 0;
-  D->FormatInMemoryUniqueId = 0;
+  D->CommentToXML = 0;
   return D;
 }
 
@@ -531,9 +530,10 @@ bool CursorVisitor::VisitChildren(CXCursor Cursor) {
   if (Cursor.kind == CXCursor_IBOutletCollectionAttr) {
     const IBOutletCollectionAttr *A =
       cast<IBOutletCollectionAttr>(cxcursor::getCursorAttr(Cursor));
-    if (const ObjCInterfaceType *InterT = A->getInterface()->getAs<ObjCInterfaceType>())
-      return Visit(cxcursor::MakeCursorObjCClassRef(InterT->getInterface(),
-                                                    A->getInterfaceLoc(), TU));
+    if (const ObjCObjectType *ObjT = A->getInterface()->getAs<ObjCObjectType>())
+      return Visit(cxcursor::MakeCursorObjCClassRef(
+          ObjT->getInterface(),
+          A->getInterfaceLoc()->getTypeLoc().getLocStart(), TU));
   }
 
   // If pointing inside a macro definition, check if the token is an identifier
@@ -747,18 +747,9 @@ bool CursorVisitor::VisitDeclaratorDecl(DeclaratorDecl *DD) {
 }
 
 /// \brief Compare two base or member initializers based on their source order.
-static int CompareCXXCtorInitializers(const void* Xp, const void *Yp) {
-  CXXCtorInitializer const * const *X
-    = static_cast<CXXCtorInitializer const * const *>(Xp);
-  CXXCtorInitializer const * const *Y
-    = static_cast<CXXCtorInitializer const * const *>(Yp);
-  
-  if ((*X)->getSourceOrder() < (*Y)->getSourceOrder())
-    return -1;
-  else if ((*X)->getSourceOrder() > (*Y)->getSourceOrder())
-    return 1;
-  else
-    return 0;
+static int CompareCXXCtorInitializers(CXXCtorInitializer *const *X,
+                                      CXXCtorInitializer *const *Y) {
+  return (*X)->getSourceOrder() - (*Y)->getSourceOrder();
 }
 
 bool CursorVisitor::VisitFunctionDecl(FunctionDecl *ND) {
@@ -1919,6 +1910,9 @@ void EnqueueVisitor::EnqueueChildren(const Stmt *S) {
 namespace {
 class OMPClauseEnqueue : public ConstOMPClauseVisitor<OMPClauseEnqueue> {
   EnqueueVisitor *Visitor;
+  /// \brief Process clauses with list of variables.
+  template <typename T>
+  void VisitOMPClauseList(T *Node);
 public:
   OMPClauseEnqueue(EnqueueVisitor *Visitor) : Visitor(Visitor) { }
 #define OPENMP_CLAUSE(Name, Class)                                             \
@@ -1927,17 +1921,27 @@ public:
 };
 
 void OMPClauseEnqueue::VisitOMPDefaultClause(const OMPDefaultClause *C) { }
-#define PROCESS_OMP_CLAUSE_LIST(Class, Node)                                   \
-  for (OMPVarList<Class>::varlist_const_iterator I = Node->varlist_begin(),    \
-                                                 E = Node->varlist_end();      \
-         I != E; ++I)                                                          \
+
+template<typename T>
+void OMPClauseEnqueue::VisitOMPClauseList(T *Node) {
+  for (typename T::varlist_const_iterator I = Node->varlist_begin(),
+                                          E = Node->varlist_end();
+         I != E; ++I)
     Visitor->AddStmt(*I);
+}
 
 void OMPClauseEnqueue::VisitOMPPrivateClause(const OMPPrivateClause *C) {
-  PROCESS_OMP_CLAUSE_LIST(OMPPrivateClause, C)
+  VisitOMPClauseList(C);
 }
-#undef PROCESS_OMP_CLAUSE_LIST
+void OMPClauseEnqueue::VisitOMPFirstprivateClause(
+                                        const OMPFirstprivateClause *C) {
+  VisitOMPClauseList(C);
 }
+void OMPClauseEnqueue::VisitOMPSharedClause(const OMPSharedClause *C) {
+  VisitOMPClauseList(C);
+}
+}
+
 void EnqueueVisitor::EnqueueChildren(const OMPClause *S) {
   unsigned size = WL.size();
   OMPClauseEnqueue Visitor(this);
@@ -2072,7 +2076,6 @@ void EnqueueVisitor::VisitDeclStmt(const DeclStmt *S) {
 }
 void EnqueueVisitor::VisitDesignatedInitExpr(const DesignatedInitExpr *E) {
   AddStmt(E->getInit());
-  typedef DesignatedInitExpr::Designator Designator;
   for (DesignatedInitExpr::const_reverse_designators_iterator
          D = E->designators_rbegin(), DEnd = E->designators_rend();
          D != DEnd; ++D) {
@@ -2256,8 +2259,7 @@ bool CursorVisitor::IsInRegionOfInterest(CXCursor C) {
 bool CursorVisitor::RunVisitorWorkList(VisitorWorkList &WL) {
   while (!WL.empty()) {
     // Dequeue the worklist item.
-    VisitorJob LI = WL.back();
-    WL.pop_back();
+    VisitorJob LI = WL.pop_back_val();
 
     // Set the Parent field, then back to its old value once we're done.
     SetParentRAII SetParent(Parent, StmtParent, LI.getParent());
@@ -2540,13 +2542,10 @@ static void fatal_error_handler(void *user_data, const std::string& reason,
 extern "C" {
 CXIndex clang_createIndex(int excludeDeclarationsFromPCH,
                           int displayDiagnostics) {
-  // Disable pretty stack trace functionality, which will otherwise be a very
-  // poor citizen of the world and set up all sorts of signal handlers.
-  llvm::DisablePrettyStackTrace = true;
-
   // We use crash recovery to make some of our APIs more reliable, implicitly
   // enable it.
-  llvm::CrashRecoveryContext::Enable();
+  if (!getenv("LIBCLANG_DISABLE_CRASH_RECOVERY"))
+    llvm::CrashRecoveryContext::Enable();
 
   // Enable support for multithreading in LLVM.
   {
@@ -2672,7 +2671,7 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
   // FIXME: Add a flag for modules.
   TranslationUnitKind TUKind
     = (options & CXTranslationUnit_Incomplete)? TU_Prefix : TU_Complete;
-  bool CacheCodeCompetionResults
+  bool CacheCodeCompletionResults
     = options & CXTranslationUnit_CacheCompletionResults;
   bool IncludeBriefCommentsInCodeCompletion
     = options & CXTranslationUnit_IncludeBriefCommentsInCodeCompletion;
@@ -2758,7 +2757,7 @@ static void clang_parseTranslationUnit_Impl(void *UserData) {
                                  /*RemappedFilesKeepOriginalName=*/true,
                                  PrecompilePreamble,
                                  TUKind,
-                                 CacheCodeCompetionResults,
+                                 CacheCodeCompletionResults,
                                  IncludeBriefCommentsInCodeCompletion,
                                  /*AllowPCHWithCompilerErrors=*/true,
                                  SkipFunctionBodies,
@@ -2905,7 +2904,7 @@ void clang_disposeTranslationUnit(CXTranslationUnit CTUnit) {
     delete CTUnit->StringPool;
     delete static_cast<CXDiagnosticSetImpl *>(CTUnit->Diagnostics);
     disposeOverridenCXCursorsPool(CTUnit->OverridenCursorsPool);
-    delete CTUnit->FormatContext;
+    delete CTUnit->CommentToXML;
     delete CTUnit;
   }
 }
@@ -3349,6 +3348,10 @@ CXString clang_getCursorSpelling(CXCursor C) {
     return cxstring::createDup(AA->getLabel());
   }
 
+  if (C.kind == CXCursor_PackedAttr) {
+    return cxstring::createRef("packed");
+  }
+
   return cxstring::createEmpty();
 }
 
@@ -3766,6 +3769,8 @@ CXString clang_getCursorKindSpelling(enum CXCursorKind Kind) {
     return cxstring::createRef("attribute(annotate)");
   case CXCursor_AsmLabelAttr:
     return cxstring::createRef("asm label");
+  case CXCursor_PackedAttr:
+    return cxstring::createRef("attribute(packed)");
   case CXCursor_PreprocessingDirective:
     return cxstring::createRef("preprocessing directive");
   case CXCursor_MacroDefinition:
@@ -4170,6 +4175,12 @@ CXSourceLocation clang_getCursorLocation(CXCursor C) {
   if (C.kind == CXCursor_InclusionDirective) {
     SourceLocation L
       = cxcursor::getCursorInclusionDirective(C)->getSourceRange().getBegin();
+    return cxloc::translateSourceLocation(getCursorContext(C), L);
+  }
+
+  if (clang_isAttribute(C.kind)) {
+    SourceLocation L
+      = cxcursor::getCursorAttr(C)->getLocation();
     return cxloc::translateSourceLocation(getCursorContext(C), L);
   }
 
@@ -5065,18 +5076,26 @@ class AnnotateTokensWorker {
     unsigned BeforeChildrenTokenIdx;
   };
   SmallVector<PostChildrenInfo, 8> PostChildrenInfos;
-  
+
+  CXToken &getTok(unsigned Idx) {
+    assert(Idx < NumTokens);
+    return Tokens[Idx];
+  }
+  const CXToken &getTok(unsigned Idx) const {
+    assert(Idx < NumTokens);
+    return Tokens[Idx];
+  }
   bool MoreTokens() const { return TokIdx < NumTokens; }
   unsigned NextToken() const { return TokIdx; }
   void AdvanceToken() { ++TokIdx; }
   SourceLocation GetTokenLoc(unsigned tokI) {
-    return SourceLocation::getFromRawEncoding(Tokens[tokI].int_data[1]);
+    return SourceLocation::getFromRawEncoding(getTok(tokI).int_data[1]);
   }
   bool isFunctionMacroToken(unsigned tokI) const {
-    return Tokens[tokI].int_data[3] != 0;
+    return getTok(tokI).int_data[3] != 0;
   }
   SourceLocation getFunctionMacroTokenLoc(unsigned tokI) const {
-    return SourceLocation::getFromRawEncoding(Tokens[tokI].int_data[3]);
+    return SourceLocation::getFromRawEncoding(getTok(tokI).int_data[3]);
   }
 
   void annotateAndAdvanceTokens(CXCursor, RangeComparisonResult, SourceRange);
@@ -5323,7 +5342,7 @@ AnnotateTokensWorker::Visit(CXCursor cursor, CXCursor parent) {
   // This can happen for C++ constructor expressions whose range generally
   // include the variable declaration, e.g.:
   //  MyCXXClass foo; // Make sure we don't annotate 'foo' as a CallExpr cursor.
-  if (clang_isExpression(cursorK)) {
+  if (clang_isExpression(cursorK) && MoreTokens()) {
     const Expr *E = getCursorExpr(cursor);
     if (const Decl *D = getCursorParentDecl(cursor)) {
       const unsigned I = NextToken();
@@ -5445,14 +5464,23 @@ public:
   }
 
 private:
+  CXToken &getTok(unsigned Idx) {
+    assert(Idx < NumTokens);
+    return Tokens[Idx];
+  }
+  const CXToken &getTok(unsigned Idx) const {
+    assert(Idx < NumTokens);
+    return Tokens[Idx];
+  }
+
   SourceLocation getTokenLoc(unsigned tokI) {
-    return SourceLocation::getFromRawEncoding(Tokens[tokI].int_data[1]);
+    return SourceLocation::getFromRawEncoding(getTok(tokI).int_data[1]);
   }
 
   void setFunctionMacroTokenLoc(unsigned tokI, SourceLocation loc) {
     // The third field is reserved and currently not used. Use it here
     // to mark macro arg expanded tokens with their expanded locations.
-    Tokens[tokI].int_data[3] = loc.getRawEncoding();
+    getTok(tokI).int_data[3] = loc.getRawEncoding();
   }
 };
 
@@ -5820,25 +5848,33 @@ static CXLanguageKind getDeclLanguage(const Decl *D) {
 }
 
 extern "C" {
+
+static CXAvailabilityKind getCursorAvailabilityForDecl(const Decl *D) {
+  if (isa<FunctionDecl>(D) && cast<FunctionDecl>(D)->isDeleted())
+    return CXAvailability_Available;
   
+  switch (D->getAvailability()) {
+  case AR_Available:
+  case AR_NotYetIntroduced:
+    if (const EnumConstantDecl *EnumConst = dyn_cast<EnumConstantDecl>(D))
+      return getCursorAvailabilityForDecl(
+          cast<Decl>(EnumConst->getDeclContext()));
+    return CXAvailability_Available;
+
+  case AR_Deprecated:
+    return CXAvailability_Deprecated;
+
+  case AR_Unavailable:
+    return CXAvailability_NotAvailable;
+  }
+
+  llvm_unreachable("Unknown availability kind!");
+}
+
 enum CXAvailabilityKind clang_getCursorAvailability(CXCursor cursor) {
   if (clang_isDeclaration(cursor.kind))
-    if (const Decl *D = cxcursor::getCursorDecl(cursor)) {
-      if (isa<FunctionDecl>(D) && cast<FunctionDecl>(D)->isDeleted())
-        return CXAvailability_Available;
-      
-      switch (D->getAvailability()) {
-      case AR_Available:
-      case AR_NotYetIntroduced:
-        return CXAvailability_Available;
-
-      case AR_Deprecated:
-        return CXAvailability_Deprecated;
-
-      case AR_Unavailable:
-        return CXAvailability_NotAvailable;
-      }
-    }
+    if (const Decl *D = cxcursor::getCursorDecl(cursor))
+      return getCursorAvailabilityForDecl(D);
 
   return CXAvailability_Available;
 }
@@ -5862,7 +5898,66 @@ static CXVersion convertVersion(VersionTuple In) {
   
   return Out;
 }
+
+static int getCursorPlatformAvailabilityForDecl(const Decl *D,
+                                                int *always_deprecated,
+                                                CXString *deprecated_message,
+                                                int *always_unavailable,
+                                                CXString *unavailable_message,
+                                           CXPlatformAvailability *availability,
+                                                int availability_size) {
+  bool HadAvailAttr = false;
+  int N = 0;
+  for (Decl::attr_iterator A = D->attr_begin(), AEnd = D->attr_end(); A != AEnd;
+       ++A) {
+    if (DeprecatedAttr *Deprecated = dyn_cast<DeprecatedAttr>(*A)) {
+      HadAvailAttr = true;
+      if (always_deprecated)
+        *always_deprecated = 1;
+      if (deprecated_message)
+        *deprecated_message = cxstring::createDup(Deprecated->getMessage());
+      continue;
+    }
+    
+    if (UnavailableAttr *Unavailable = dyn_cast<UnavailableAttr>(*A)) {
+      HadAvailAttr = true;
+      if (always_unavailable)
+        *always_unavailable = 1;
+      if (unavailable_message) {
+        *unavailable_message = cxstring::createDup(Unavailable->getMessage());
+      }
+      continue;
+    }
+    
+    if (AvailabilityAttr *Avail = dyn_cast<AvailabilityAttr>(*A)) {
+      HadAvailAttr = true;
+      if (N < availability_size) {
+        availability[N].Platform
+          = cxstring::createDup(Avail->getPlatform()->getName());
+        availability[N].Introduced = convertVersion(Avail->getIntroduced());
+        availability[N].Deprecated = convertVersion(Avail->getDeprecated());
+        availability[N].Obsoleted = convertVersion(Avail->getObsoleted());
+        availability[N].Unavailable = Avail->getUnavailable();
+        availability[N].Message = cxstring::createDup(Avail->getMessage());
+      }
+      ++N;
+    }
+  }
+
+  if (!HadAvailAttr)
+    if (const EnumConstantDecl *EnumConst = dyn_cast<EnumConstantDecl>(D))
+      return getCursorPlatformAvailabilityForDecl(
+                                        cast<Decl>(EnumConst->getDeclContext()),
+                                                  always_deprecated,
+                                                  deprecated_message,
+                                                  always_unavailable,
+                                                  unavailable_message,
+                                                  availability,
+                                                  availability_size);
   
+  return N;
+}
+
 int clang_getCursorPlatformAvailability(CXCursor cursor,
                                         int *always_deprecated,
                                         CXString *deprecated_message,
@@ -5878,49 +5973,20 @@ int clang_getCursorPlatformAvailability(CXCursor cursor,
     *always_unavailable = 0;
   if (unavailable_message)
     *unavailable_message = cxstring::createEmpty();
-  
+
   if (!clang_isDeclaration(cursor.kind))
     return 0;
-  
+
   const Decl *D = cxcursor::getCursorDecl(cursor);
   if (!D)
     return 0;
-  
-  int N = 0;
-  for (Decl::attr_iterator A = D->attr_begin(), AEnd = D->attr_end(); A != AEnd;
-       ++A) {
-    if (DeprecatedAttr *Deprecated = dyn_cast<DeprecatedAttr>(*A)) {
-      if (always_deprecated)
-        *always_deprecated = 1;
-      if (deprecated_message)
-        *deprecated_message = cxstring::createDup(Deprecated->getMessage());
-      continue;
-    }
-    
-    if (UnavailableAttr *Unavailable = dyn_cast<UnavailableAttr>(*A)) {
-      if (always_unavailable)
-        *always_unavailable = 1;
-      if (unavailable_message) {
-        *unavailable_message = cxstring::createDup(Unavailable->getMessage());
-      }
-      continue;
-    }
-    
-    if (AvailabilityAttr *Avail = dyn_cast<AvailabilityAttr>(*A)) {
-      if (N < availability_size) {
-        availability[N].Platform
-          = cxstring::createDup(Avail->getPlatform()->getName());
-        availability[N].Introduced = convertVersion(Avail->getIntroduced());
-        availability[N].Deprecated = convertVersion(Avail->getDeprecated());
-        availability[N].Obsoleted = convertVersion(Avail->getObsoleted());
-        availability[N].Unavailable = Avail->getUnavailable();
-        availability[N].Message = cxstring::createDup(Avail->getMessage());
-      }
-      ++N;
-    }
-  }
-  
-  return N;
+
+  return getCursorPlatformAvailabilityForDecl(D, always_deprecated,
+                                              deprecated_message,
+                                              always_unavailable,
+                                              unavailable_message,
+                                              availability,
+                                              availability_size);
 }
   
 void clang_disposeCXPlatformAvailability(CXPlatformAvailability *availability) {

@@ -48,7 +48,7 @@ class RefState {
               Allocated,
               // Reference to released/freed memory.
               Released,
-              // The responsibility for freeing resources has transfered from
+              // The responsibility for freeing resources has transferred from
               // this reference. A relinquished symbol should not be freed.
               Relinquished,
               // We are no longer guaranteed to have observed all manipulations
@@ -234,9 +234,9 @@ private:
   bool isAllocationFunction(const FunctionDecl *FD, ASTContext &C) const;
   bool isStandardNewDelete(const FunctionDecl *FD, ASTContext &C) const;
   ///@}
-  static ProgramStateRef MallocMemReturnsAttr(CheckerContext &C,
-                                              const CallExpr *CE,
-                                              const OwnershipAttr* Att);
+  ProgramStateRef MallocMemReturnsAttr(CheckerContext &C,
+                                       const CallExpr *CE,
+                                       const OwnershipAttr* Att) const;
   static ProgramStateRef MallocMemAux(CheckerContext &C, const CallExpr *CE,
                                      const Expr *SizeEx, SVal Init,
                                      ProgramStateRef State,
@@ -313,7 +313,7 @@ private:
                      const Expr *DeallocExpr) const;
   void ReportMismatchedDealloc(CheckerContext &C, SourceRange Range,
                                const Expr *DeallocExpr, const RefState *RS,
-                               SymbolRef Sym) const;
+                               SymbolRef Sym, bool OwnershipTransferred) const;
   void ReportOffsetFree(CheckerContext &C, SVal ArgVal, SourceRange Range, 
                         const Expr *DeallocExpr, 
                         const Expr *AllocExpr = 0) const;
@@ -729,10 +729,10 @@ void MallocChecker::checkPostObjCMessage(const ObjCMethodCall &Call,
   C.addTransition(State);
 }
 
-ProgramStateRef MallocChecker::MallocMemReturnsAttr(CheckerContext &C,
-                                                    const CallExpr *CE,
-                                                    const OwnershipAttr* Att) {
-  if (Att->getModule() != "malloc")
+ProgramStateRef
+MallocChecker::MallocMemReturnsAttr(CheckerContext &C, const CallExpr *CE,
+                                    const OwnershipAttr *Att) const {
+  if (Att->getModule() != II_malloc)
     return 0;
 
   OwnershipAttr::args_iterator I = Att->args_begin(), E = Att->args_end();
@@ -804,8 +804,8 @@ ProgramStateRef MallocChecker::MallocUpdateRefState(CheckerContext &C,
 
 ProgramStateRef MallocChecker::FreeMemAttr(CheckerContext &C,
                                            const CallExpr *CE,
-                                           const OwnershipAttr* Att) const {
-  if (Att->getModule() != "malloc")
+                                           const OwnershipAttr *Att) const {
+  if (Att->getModule() != II_malloc)
     return 0;
 
   ProgramStateRef State = C.getState();
@@ -1042,7 +1042,7 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
         RsBase->getAllocationFamily() == getAllocationFamily(C, ParentExpr);
       if (!DeallocMatchesAlloc) {
         ReportMismatchedDealloc(C, ArgExpr->getSourceRange(),
-                                ParentExpr, RsBase, SymBase);
+                                ParentExpr, RsBase, SymBase, Hold);
         return 0;
       }
 
@@ -1060,7 +1060,7 @@ ProgramStateRef MallocChecker::FreeMemAux(CheckerContext &C,
     }
   }
 
-  ReleasedAllocated = (RsBase != 0);
+  ReleasedAllocated = (RsBase != 0) && RsBase->isAllocated();
 
   // Clean out the info on previous call to free return info.
   State = State->remove<FreeReturnValue>(SymBase);
@@ -1260,7 +1260,8 @@ void MallocChecker::ReportMismatchedDealloc(CheckerContext &C,
                                             SourceRange Range,
                                             const Expr *DeallocExpr, 
                                             const RefState *RS,
-                                            SymbolRef Sym) const {
+                                            SymbolRef Sym, 
+                                            bool OwnershipTransferred) const {
 
   if (!Filter.CMismatchedDeallocatorChecker)
     return;
@@ -1279,15 +1280,27 @@ void MallocChecker::ReportMismatchedDealloc(CheckerContext &C,
     SmallString<20> DeallocBuf;
     llvm::raw_svector_ostream DeallocOs(DeallocBuf);
 
-    os << "Memory";
-    if (printAllocDeallocName(AllocOs, C, AllocExpr))
-      os << " allocated by " << AllocOs.str();
+    if (OwnershipTransferred) {
+      if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
+        os << DeallocOs.str() << " cannot";
+      else 
+        os << "Cannot";
 
-    os << " should be deallocated by ";
-      printExpectedDeallocName(os, RS->getAllocationFamily());
+      os << " take ownership of memory";
 
-    if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
-      os << ", not " << DeallocOs.str();
+      if (printAllocDeallocName(AllocOs, C, AllocExpr))
+        os << " allocated by " << AllocOs.str();
+    } else {
+      os << "Memory";
+      if (printAllocDeallocName(AllocOs, C, AllocExpr))
+        os << " allocated by " << AllocOs.str();
+
+      os << " should be deallocated by ";
+        printExpectedDeallocName(os, RS->getAllocationFamily());
+
+      if (printAllocDeallocName(DeallocOs, C, DeallocExpr))
+        os << ", not " << DeallocOs.str();
+    }
 
     BugReport *R = new BugReport(*BT_MismatchedDealloc, os.str(), N);
     R->markInteresting(Sym);
@@ -1790,7 +1803,8 @@ bool MallocChecker::isReleased(SymbolRef Sym, CheckerContext &C) const {
 bool MallocChecker::checkUseAfterFree(SymbolRef Sym, CheckerContext &C,
                                       const Stmt *S) const {
 
-  if (isReleased(Sym, C)) {
+  // FIXME: Handle destructor called from delete more precisely.
+  if (isReleased(Sym, C) && S) {
     ReportUseAfterFree(C, S->getSourceRange(), Sym);
     return true;
   }
@@ -2116,7 +2130,7 @@ MallocChecker::MallocBugVisitor::VisitNode(const ExplodedNode *N,
       StackHint = new StackHintGeneratorForSymbol(Sym,
                                              "Returning; memory was released");
     } else if (isRelinquished(RS, RSPrev, S)) {
-      Msg = "Memory ownership is transfered";
+      Msg = "Memory ownership is transferred";
       StackHint = new StackHintGeneratorForSymbol(Sym, "");
     } else if (isReallocFailedCheck(RS, RSPrev, S)) {
       Mode = ReallocationFailed;

@@ -72,18 +72,22 @@ bool ObjCRuntime::tryParse(StringRef input) {
     kind = ObjCRuntime::GCC;
   } else if (runtimeName == "objfw") {
     kind = ObjCRuntime::ObjFW;
+    Version = VersionTuple(0, 8);
   } else if (runtimeName == "host") {
     kind = ObjCRuntime::Host;
   } else {
     return true;
   }
   TheKind = kind;
-  
+
   if (dash != StringRef::npos) {
     StringRef verString = input.substr(dash + 1);
-    if (Version.tryParse(verString)) 
+    if (Version.tryParse(verString))
       return true;
   }
+
+  if (kind == ObjCRuntime::ObjFW && Version > VersionTuple(0, 8))
+    Version = VersionTuple(0, 8);
 
   return false;
 }

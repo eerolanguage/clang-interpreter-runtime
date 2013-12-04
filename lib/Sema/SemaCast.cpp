@@ -243,7 +243,9 @@ Sema::BuildCXXNamedCast(SourceLocation OpLoc, tok::TokenKind Kind,
 
   // If the type is dependent, we won't do the semantic analysis now.
   // FIXME: should we check this in a more fine-grained manner?
-  bool TypeDependent = DestType->isDependentType() || Ex.get()->isTypeDependent();
+  bool TypeDependent = DestType->isDependentType() ||
+                       Ex.get()->isTypeDependent() ||
+                       Ex.get()->isValueDependent();
 
   CastOperation Op(*this, DestType, E);
   Op.OpRange = SourceRange(OpLoc, Parens.getEnd());
@@ -667,8 +669,10 @@ void CastOperation::CheckDynamicCast() {
   Self.MarkVTableUsed(OpRange.getBegin(), 
                       cast<CXXRecordDecl>(SrcRecord->getDecl()));
 
-  // dynamic_cast is not available with fno-rtti
-  if (!Self.getLangOpts().RTTI) {
+  // dynamic_cast is not available with -fno-rtti.
+  // As an exception, dynamic_cast to void* is available because it doesn't
+  // use RTTI.
+  if (!Self.getLangOpts().RTTI && !DestPointee->isVoidType()) {
     Self.Diag(OpRange.getBegin(), diag::err_no_dynamic_cast_with_fno_rtti);
     SrcExpr = ExprError();
     return;
@@ -2008,7 +2012,8 @@ void CastOperation::CheckCXXCStyleCast(bool FunctionalStyle,
   }
 
   // If the type is dependent, we won't do any other semantic analysis now.
-  if (DestType->isDependentType() || SrcExpr.get()->isTypeDependent()) {
+  if (DestType->isDependentType() || SrcExpr.get()->isTypeDependent() ||
+      SrcExpr.get()->isValueDependent()) {
     assert(Kind == CK_Dependent);
     return;
   }
@@ -2069,6 +2074,8 @@ void CastOperation::CheckCXXCStyleCast(bool FunctionalStyle,
 
   if (Self.getLangOpts().ObjCAutoRefCount && tcr == TC_Success)
     checkObjCARCConversion(CCK);
+  else if (Self.getLangOpts().ObjC1 && tcr == TC_Success)
+    Self.CheckTollFreeBridgeCast(DestType, SrcExpr.get());
 
   if (tcr != TC_Success && msg != 0) {
     if (SrcExpr.get()->getType() == Self.Context.OverloadTy) {
@@ -2314,6 +2321,9 @@ void CastOperation::CheckCStyleCast() {
       return;
     }
   }
+  else if (Self.getLangOpts().ObjC1)
+    Self.CheckTollFreeBridgeCast(DestType, SrcExpr.get());
+  
   DiagnoseCastOfObjCSEL(Self, SrcExpr, DestType);
   DiagnoseBadFunctionCast(Self, SrcExpr, DestType);
   Kind = Self.PrepareScalarCast(SrcExpr, DestType);
@@ -2361,9 +2371,9 @@ ExprResult Sema::BuildCXXFunctionalCastExpr(TypeSourceInfo *CastTypeInfo,
     return ExprError();
   
   if (CXXConstructExpr *ConstructExpr = dyn_cast<CXXConstructExpr>(Op.SrcExpr.get()))
-    ConstructExpr->setParenRange(SourceRange(LPLoc, RPLoc));
+    ConstructExpr->setParenOrBraceRange(SourceRange(LPLoc, RPLoc));
 
   return Op.complete(CXXFunctionalCastExpr::Create(Context, Op.ResultType,
-                         Op.ValueKind, CastTypeInfo, Op.DestRange.getBegin(),
-                         Op.Kind, Op.SrcExpr.take(), &Op.BasePath, RPLoc));
+                         Op.ValueKind, CastTypeInfo, Op.Kind,
+                         Op.SrcExpr.take(), &Op.BasePath, LPLoc, RPLoc));
 }
